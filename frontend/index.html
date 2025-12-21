@@ -4,32 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>语音转文本服务</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <style>
-        body {
-            background-color: #1E1E1E;
-            color: #D4D4D4;
-        }
-        .speaker-1 { color: #4ECDC4; }
-        .speaker-2 { color: #FF6B6B; }
-        .speaker-3 { color: #45B7D1; }
-        .interim-text { color: #888888; }
-        .status-dot {
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
-            display: inline-block;
-            margin-right: 8px;
-            animation: pulse 2s infinite;
-        }
-        .status-connecting { background-color: #FBBF24; }
-        .status-connected { background-color: #34D399; animation: none; }
-        .status-disconnected { background-color: #F87171; animation: none; }
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
-        }
-    </style>
+    <link rel="stylesheet" href="css/styles.css">
 </head>
 <body class="min-h-screen flex flex-col">
     <!-- 头部状态栏 -->
@@ -72,7 +47,7 @@
         </div>
 
         <!-- 文本显示区域 -->
-        <div id="textDisplay" class="bg-gray-800 rounded-lg p-6 min-h-[400px] font-sans text-lg leading-relaxed overflow-y-auto">
+        <div id="textDisplay" class="bg-gray-800 rounded-lg p-6 min-h-400px font-sans text-lg leading-relaxed overflow-y-auto">
             <div class="text-gray-500 text-center">点击"开始录音"开始语音转文本...</div>
         </div>
     </main>
@@ -313,7 +288,7 @@
 
             showNotification(message) {
                 const notification = document.createElement('div');
-                notification.className = 'fixed top-20 right-4 bg-green-600 text-white px-4 py-2 rounded shadow-lg';
+                notification.className = 'notification';
                 notification.textContent = message;
                 document.body.appendChild(notification);
 

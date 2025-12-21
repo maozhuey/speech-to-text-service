@@ -17,7 +17,11 @@ class FunASRService:
 
     def __init__(self, model_dir: str = None):
         # 获取项目根目录（语音转文本服务目录）
-        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        # 文件位于: /path/to/语音转文本服务/backend/app/services/funasr_service.py
+        # 需要回到项目根目录: /path/to/语音转文本服务/
+        current_file_path = os.path.dirname(os.path.abspath(__file__))  # backend/app/services/
+        backend_path = os.path.dirname(os.path.dirname(current_file_path))  # backend/
+        project_root = os.path.dirname(backend_path)  # 语音转文本服务/
         self.model_dir = model_dir or os.path.join(project_root, "models/damo")
         self.asr_pipeline = None
         self.punc_pipeline = None
