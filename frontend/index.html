@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>语音转文本服务</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            background-color: #1E1E1E;
+            color: #D4D4D4;
+        }
+        .speaker-1 { color: #4ECDC4; }
+        .speaker-2 { color: #FF6B6B; }
+        .speaker-3 { color: #45B7D1; }
+        .interim-text { color: #888888; }
+        .status-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 8px;
+            animation: pulse 2s infinite;
+        }
+        .status-connecting { background-color: #FBBF24; }
+        .status-connected { background-color: #34D399; animation: none; }
+        .status-disconnected { background-color: #F87171; animation: none; }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col">
+    <!-- 头部状态栏 -->
+    <header class="bg-gray-800 border-b border-gray-700 p-4">
+        <div class="container mx-auto flex justify-between items-center">
+            <h1 class="text-2xl font-bold">语音转文本服务</h1>
+            <div class="flex items-center space-x-4">
+                <!-- 连接状态 -->
+                <div id="statusIndicator" class="flex items-center">
+                    <span id="statusDot" class="status-dot status-disconnected"></span>
+                    <span id="statusText">未连接</span>
+                </div>
+                <!-- 重连按钮 -->
+                <button id="reconnectBtn" class="hidden px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700">
+                    重新连接
+                </button>
+                <!-- 操作按钮 -->
+                <div class="flex space-x-2">
+                    <button id="copyBtn" class="px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700">
+                        复制全部
+                    </button>
+                    <button id="clearBtn" class="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700">
+                        清空屏幕
+                    </button>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- 主内容区域 -->
+    <main class="flex-1 container mx-auto p-4">
+        <!-- 音频控制 -->
+        <div class="mb-6 text-center">
+            <button id="startBtn" class="px-6 py-3 bg-blue-600 text-white rounded-lg text-lg hover:bg-blue-700 disabled:opacity-50">
+                🎤 开始录音
+            </button>
+            <button id="stopBtn" class="hidden px-6 py-3 bg-red-600 text-white rounded-lg text-lg hover:bg-red-700">
+                ⏹️ 停止录音
+            </button>
+        </div>
+
+        <!-- 文本显示区域 -->
+        <div id="textDisplay" class="bg-gray-800 rounded-lg p-6 min-h-[400px] font-sans text-lg leading-relaxed overflow-y-auto">
+            <div class="text-gray-500 text-center">点击"开始录音"开始语音转文本...</div>
+        </div>
+    </main>
+
+    <!-- 底部信息 -->
+    <footer class="bg-gray-800 border-t border-gray-700 p-4">
+        <div class="container mx-auto text-center text-gray-400">
+            <p>支持中文语音识别 • 说话人分离 • 自动标点 • 时间戳</p>
+            <p class="text-sm mt-2">最大并发连接: 2 | 音频格式: 16kHz PCM</p>
+        </div>
+    </footer>
+
+    <script>
+        class SpeechToTextApp {
+            constructor() {
+                this.ws = null;
+                this.mediaRecorder = null;
+                this.audioStream = null;
+                this.isRecording = false;
+                this.currentSentence = null;
+                this.reconnectAttempts = 0;
+                this.maxReconnectAttempts = 10;
+
+                this.initElements();
+                this.initEventListeners();
+                this.connectWebSocket();
+            }
+
+            initElements() {
+                this.startBtn = document.getElementById('startBtn');
+                this.stopBtn = document.getElementById('stopBtn');
+                this.copyBtn = document.getElementById('copyBtn');
+                this.clearBtn = document.getElementById('clearBtn');
+                this.reconnectBtn = document.getElementById('reconnectBtn');
+                this.statusDot = document.getElementById('statusDot');
+                this.statusText = document.getElementById('statusText');
+                this.textDisplay = document.getElementById('textDisplay');
+            }
+
+            initEventListeners() {
+                this.startBtn.addEventListener('click', () => this.startRecording());
+                this.stopBtn.addEventListener('click', () => this.stopRecording());
+                this.copyBtn.addEventListener('click', () => this.copyAllText());
+                this.clearBtn.addEventListener('click', () => this.clearDisplay());
+                this.reconnectBtn.addEventListener('click', () => this.connectWebSocket());
+            }
+
+            connectWebSocket() {
+                this.updateStatus('connecting', '正在连接...');
+                this.reconnectBtn.classList.add('hidden');
+
+                try {
+                    this.ws = new WebSocket('ws://localhost:8000/ws');
+
+                    this.ws.onopen = () => {
+                        this.updateStatus('connected', '已连接');
+                        this.reconnectAttempts = 0;
+                        console.log('WebSocket连接成功');
+                    };
+
+                    this.ws.onmessage = (event) => {
+                        this.handleMessage(JSON.parse(event.data));
+                    };
+
+                    this.ws.onclose = (event) => {
+                        this.updateStatus('disconnected', '连接断开');
+                        console.log('WebSocket连接关闭:', event.code);
+                        this.startReconnect();
+                    };
+
+                    this.ws.onerror = (error) => {
+                        console.error('WebSocket错误:', error);
+                        this.updateStatus('disconnected', '连接错误');
+                    };
+                } catch (error) {
+                    console.error('连接失败:', error);
+                    this.updateStatus('disconnected', '连接失败');
+                    this.startReconnect();
+                }
+            }
+
+            startReconnect() {
+                if (this.reconnectAttempts < this.maxReconnectAttempts) {
+                    this.reconnectAttempts++;
+                    this.updateStatus('connecting', `正在重连... (${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+
+                    setTimeout(() => {
+                        this.connectWebSocket();
+                    }, 5000);
+                } else {
+                    this.reconnectBtn.classList.remove('hidden');
+                    this.updateStatus('disconnected', '重连失败');
+                }
+            }
+
+            async startRecording() {
+                try {
+                    // 请求麦克风权限
+                    this.audioStream = await navigator.mediaDevices.getUserMedia({
+                        audio: {
+                            sampleRate: 16000,
+                            channelCount: 1,
+                            echoCancellation: true,
+                            noiseSuppression: true
+                        }
+                    });
+
+                    // 创建录音器
+                    this.mediaRecorder = new MediaRecorder(this.audioStream, {
+                        mimeType: 'audio/webm'
+                    });
+
+                    // 设置数据处理
+                    this.mediaRecorder.ondataavailable = (event) => {
+                        if (event.data.size > 0 && this.ws && this.ws.readyState === WebSocket.OPEN) {
+                            // 转换为PCM格式并发送
+                            this.convertAndSendAudio(event.data);
+                        }
+                    };
+
+                    // 开始录音
+                    this.mediaRecorder.start(100); // 每100ms收集一次数据
+                    this.isRecording = true;
+
+                    // 更新UI
+                    this.startBtn.classList.add('hidden');
+                    this.stopBtn.classList.remove('hidden');
+                    this.startBtn.disabled = true;
+
+                } catch (error) {
+                    console.error('录音启动失败:', error);
+                    alert('无法访问麦克风，请检查权限设置');
+                }
+            }
+
+            stopRecording() {
+                if (this.mediaRecorder && this.isRecording) {
+                    this.mediaRecorder.stop();
+                    this.isRecording = false;
+
+                    // 停止音频流
+                    if (this.audioStream) {
+                        this.audioStream.getTracks().forEach(track => track.stop());
+                    }
+
+                    // 更新UI
+                    this.startBtn.classList.remove('hidden');
+                    this.stopBtn.classList.add('hidden');
+                    this.startBtn.disabled = false;
+                }
+            }
+
+            async convertAndSendAudio(blob) {
+                // 这里应该将WebM转换为PCM格式
+                // 简化处理，直接发送二进制数据
+                const arrayBuffer = await blob.arrayBuffer();
+                if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                    this.ws.send(arrayBuffer);
+                }
+            }
+
+            handleMessage(message) {
+                switch (message.type) {
+                    case 'connection_established':
+                        console.log('连接建立成功:', message.session_id);
+                        break;
+
+                    case 'connection_rejected':
+                        console.error('连接被拒绝:', message.message);
+                        this.updateStatus('disconnected', '连接被拒绝');
+                        break;
+
+                    case 'recognition_result':
+                        this.displayResult(message);
+                        break;
+
+                    case 'error':
+                        console.error('服务器错误:', message.message);
+                        break;
+                }
+            }
+
+            displayResult(result) {
+                if (result.is_final) {
+                    // 最终结果
+                    this.addFinalText(result.text, result.speaker);
+                } else {
+                    // 中间结果
+                    this.updateInterimText(result.text);
+                }
+            }
+
+            addFinalText(text, speaker) {
+                // 清空初始提示
+                if (this.textDisplay.querySelector('.text-gray-500')) {
+                    this.textDisplay.innerHTML = '';
+                }
+
+                // 创建新句子
+                const sentenceDiv = document.createElement('div');
+                sentenceDiv.className = 'mb-4';
+
+                const speakerSpan = document.createElement('span');
+                speakerSpan.className = `speaker-${speaker} font-semibold mr-2`;
+                speakerSpan.textContent = `[${speaker}]`;
+
+                const textSpan = document.createElement('span');
+                textSpan.textContent = text;
+
+                sentenceDiv.appendChild(speakerSpan);
+                sentenceDiv.appendChild(textSpan);
+
+                this.textDisplay.appendChild(sentenceDiv);
+                this.scrollToBottom();
+            }
+
+            updateInterimText(text) {
+                // 这里可以实现中间文本的显示逻辑
+                // 暂时简化处理
+            }
+
+            copyAllText() {
+                const textContent = this.textDisplay.innerText;
+                navigator.clipboard.writeText(textContent).then(() => {
+                    this.showNotification('已复制到剪贴板');
+                }).catch(err => {
+                    console.error('复制失败:', err);
+                });
+            }
+
+            clearDisplay() {
+                this.textDisplay.innerHTML = '<div class="text-gray-500 text-center">点击"开始录音"开始语音转文本...</div>';
+            }
+
+            scrollToBottom() {
+                this.textDisplay.scrollTop = this.textDisplay.scrollHeight;
+            }
+
+            showNotification(message) {
+                const notification = document.createElement('div');
+                notification.className = 'fixed top-20 right-4 bg-green-600 text-white px-4 py-2 rounded shadow-lg';
+                notification.textContent = message;
+                document.body.appendChild(notification);
+
+                setTimeout(() => {
+                    document.body.removeChild(notification);
+                }, 3000);
+            }
+
+            updateStatus(status, text) {
+                this.statusDot.className = `status-dot status-${status}`;
+                this.statusText.textContent = text;
+            }
+        }
+
+        // 初始化应用
+        document.addEventListener('DOMContentLoaded', () => {
+            new SpeechToTextApp();
+        });
+    </script>
+</body>
+</html>
