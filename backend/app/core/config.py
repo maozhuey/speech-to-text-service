@@ -7,7 +7,7 @@ class Settings(BaseSettings):
 
     # 服务配置
     host: str = "0.0.0.0"
-    port: int = 8000
+    port: int = 8002
     max_connections: int = 2
 
     # FunASR模型配置

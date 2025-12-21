@@ -125,7 +125,7 @@
                 this.reconnectBtn.classList.add('hidden');
 
                 try {
-                    this.ws = new WebSocket('ws://localhost:8000/ws');
+                    this.ws = new WebSocket('ws://localhost:8002/ws');
 
                     this.ws.onopen = () => {
                         this.updateStatus('connected', '已连接');

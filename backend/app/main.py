@@ -38,9 +38,9 @@ app = FastAPI(
 # 配置CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:9000", "http://127.0.0.1:9000"],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],  # 限制允许的方法
     allow_headers=["*"],
 )
 
@@ -51,16 +51,42 @@ app.include_router(info.router, prefix="/api/v1", tags=["info"])
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket端点，处理实时音频流和语音识别"""
-    await websocket_manager.connect(websocket)
+    # 建立连接
+    connected = await websocket_manager.connect(websocket)
+
+    # 如果连接未被接受，直接返回
+    if not connected:
+        return
+
     try:
         while True:
             # 接收客户端发送的数据
-            data = await websocket.receive_bytes()
-            await websocket_manager.process_audio(websocket, data)
+            try:
+                data = await websocket.receive_bytes()
+                await websocket_manager.process_audio(websocket, data)
+            except Exception as e:
+                logger.error(f"处理音频数据失败: {e}")
+                # 如果是连接断开相关的错误，退出循环
+                if "disconnect" in str(e).lower() or "connection" in str(e).lower():
+                    break
+                # 发送错误消息给客户端
+                try:
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": f"音频处理失败: {str(e)}"
+                    })
+                except:
+                    # 如果发送失败，说明连接已断开
+                    break
+                # 不中断连接，继续接收数据
+                continue
+
     except WebSocketDisconnect:
-        await websocket_manager.disconnect(websocket)
+        logger.info("客户端主动断开连接")
     except Exception as e:
-        logger.error(f"WebSocket error: {e}")
+        logger.error(f"WebSocket错误: {e}")
+    finally:
+        # 确保连接被正确清理
         await websocket_manager.disconnect(websocket)
 
 @app.get("/", response_class=HTMLResponse)

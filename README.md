@@ -1,65 +1,94 @@
-# 语音转文本基础服务
+# 语音转文本服务
 
-基于FunASR的中文语音转文本服务，支持实时语音识别、说话人分离、智能标点和时间戳功能。
+基于FunASR的中文语音转文本实时服务，提供WebSocket接口和友好的Web界面。
 
-## 功能特性
+## 🌟 特性
 
-- 🎤 **实时语音识别**：低延迟的中文语音转文本
-- 👥 **说话人分离**：自动识别和标注不同说话人
-- 📝 **智能标点**：自动添加中文标点符号
-- ⏰ **时间戳支持**：精确记录每句话的时间信息
-- 🔗 **WebSocket通信**：实时双向数据传输
-- 🚀 **性能优化**：针对M2 Pro设备优化，支持2个并发连接
+- **实时语音识别**：基于WebSocket的实时音频流处理
+- **中文优化**：专门针对中文语音识别优化
+- **Web界面**：简洁美观的Web操作界面
+- **标点符号恢复**：自动添加标点符号，提升可读性
+- **VAD语音活动检测**：智能检测语音片段
+- **多连接支持**：支持多个客户端同时连接（当前限制2个）
+- **模拟模式**：开发测试阶段支持模拟识别结果
 
-## 快速开始
+## 🏗️ 系统架构
+
+```
+语音转文本服务/
+├── backend/                 # 后端服务
+│   ├── app/
+│   │   ├── api/             # API路由
+│   │   ├── core/            # 核心功能
+│   │   │   ├── config.py    # 配置文件
+│   │   │   └── websocket.py # WebSocket处理器
+│   │   ├── services/        # 服务层
+│   │   │   └── funasr_service.py # FunASR语音识别服务
+│   │   └── main.py          # FastAPI主应用
+│   └── requirements.txt     # Python依赖
+├── frontend/                # 前端界面
+│   ├── index.html          # Web界面
+│   ├── css/                # 样式文件
+│   └── js/                 # JavaScript文件
+├── models/                 # 模型目录
+│   └── damo/               # FunASR模型文件
+├── start_backend.py        # 后端启动脚本
+└── README.md               # 项目说明
+```
+
+## 🚀 快速开始
 
 ### 环境要求
 
 - Python 3.9+
-- M2 Pro (16GB RAM) MacBook Pro（推荐）
-- 支持的浏览器：Chrome 80+, Firefox 75+, Safari 13+
+- 现代浏览器（Chrome、Firefox、Safari等）
 
-### 安装步骤
+### 安装依赖
 
-1. **克隆项目**
 ```bash
-git clone <repository-url>
-cd 语音转文本服务
-```
-
-2. **创建虚拟环境**
-```bash
+# 创建虚拟环境
 python -m venv venv
-source venv/bin/activate  # macOS/Linux
-# 或 venv\Scripts\activate  # Windows
+source venv/bin/activate  # Windows: venv\Scripts\activate
+
+# 安装Python依赖
+pip install -r backend/requirements.txt
 ```
 
-3. **安装依赖**
+### 下载模型（可选）
+
+如果需要使用真实的FunASR功能，需要下载模型文件：
+
 ```bash
-pip install -r requirements.txt
+# 模型会自动下载到 models/damo/ 目录
+# 当前版本使用模拟模式，无需下载模型
 ```
 
-4. **配置环境**
+### 启动服务
+
+#### 方法1：使用启动脚本
+
 ```bash
-cp .env.example .env
-# 根据需要修改 .env 文件中的配置
+# 启动后端服务
+python start_backend.py
 ```
 
-5. **启动服务**
+#### 方法2：手动启动
+
 ```bash
 # 启动后端服务
 cd backend
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload
 
-# 在另一个终端启动前端服务（可选）
+# 启动前端服务（新终端）
 cd frontend
-python -m http.server 3000
+python -m http.server 8080
 ```
 
-6. **访问界面**
-- Web界面：http://localhost:3000
-- API文档：http://localhost:8000/docs
-- WebSocket：ws://localhost:8000/ws
+### 访问服务
+
+- **Web界面**: http://localhost:8080
+- **API文档**: http://localhost:8002/docs
+- **健康检查**: http://localhost:8002/api/v1/health
 
 ## 使用方法
 
