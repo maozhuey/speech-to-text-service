@@ -2,6 +2,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from typing import Optional
 import uvicorn
 import logging
 import sys
@@ -121,9 +122,44 @@ async def generate_token():
         "message": "请使用此令牌连接WebSocket: ws://host/ws?token=YOUR_TOKEN"
     })
 
+
+@app.get("/api/v1/models", tags=["models"])
+async def list_models():
+    """
+    获取可用的语音识别模型列表
+
+    返回所有配置的模型及其状态信息。
+    """
+    models_config = settings.get_models_config()
+
+    return JSONResponse({
+        "success": True,
+        "default": settings.default_model,
+        "models": [
+            {
+                "name": model_name,
+                "display_name": model_config.get("display_name", model_name),
+                "type": model_config.get("type", "unknown"),
+                "description": model_config.get("description", ""),
+                "enabled": model_config.get("enabled", False)
+            }
+            for model_name, model_config in models_config.items()
+        ]
+    })
+
+
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    """WebSocket端点，处理实时音频流和语音识别"""
+async def websocket_endpoint(
+    websocket: WebSocket,
+    model: Optional[str] = None  # 新增：模型选择参数
+):
+    """
+    WebSocket 端点，处理实时音频流和语音识别
+
+    Query Parameters:
+    - token: 可选的访问令牌
+    - model: 可选的模型名称（offline 或 streaming），默认使用配置中的默认模型
+    """
 
     # 获取客户端IP用于限流
     client_ip = websocket.client.host if websocket.client else "unknown"
@@ -144,8 +180,8 @@ async def websocket_endpoint(websocket: WebSocket):
         # 认证失败且连接已关闭
         return
 
-    # 建立连接
-    connected = await websocket_manager.connect(websocket)
+    # 建立连接（传入模型参数）
+    connected = await websocket_manager.connect(websocket, model=model)
 
     # 如果连接未被接受，直接返回
     if not connected:

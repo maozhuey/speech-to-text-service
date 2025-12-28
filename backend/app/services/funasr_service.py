@@ -18,66 +18,102 @@ logger = logging.getLogger(__name__)
 # 限制线程数以避免资源耗尽
 _model_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="funasr_model")
 
+# 导入模型管理器
+from app.services.model_manager import get_model_manager
+
 
 class FunASRService:
-    """FunASR语音识别服务类"""
+    """
+    FunASR 语音识别服务类
 
-    def __init__(self, model_dir: str = None):
+    支持多模型管理和动态切换：
+    - offline: 离线模型（高精度，延迟5-10秒）
+    - streaming: 流式模型（低延迟，延迟<300ms）
+    """
+
+    def __init__(self, model_dir: str = None, default_model: str = "offline"):
         # 获取项目根目录（语音转文本服务目录）
-        # 文件位于: /path/to/语音转文本服务/backend/app/services/funasr_service.py
-        # 需要回到项目根目录: /path/to/语音转文本服务/
         current_file_path = os.path.dirname(os.path.abspath(__file__))  # backend/app/services/
         backend_path = os.path.dirname(os.path.dirname(current_file_path))  # backend/
         project_root = os.path.dirname(backend_path)  # 语音转文本服务/
         self.model_dir = model_dir or os.path.join(project_root, "models/damo")
+
+        # 多模型支持
+        self.default_model = default_model
+        self.model_manager = None
+        self.current_model = default_model
+
+        # 保留向后兼容的属性
         self.asr_pipeline = None
         self.punc_pipeline = None
         self.vad_pipeline = None
         self.is_initialized = False
 
-    async def initialize(self):
-        """初始化所有模型"""
+    async def initialize(self, model_name: Optional[str] = None):
+        """
+        初始化模型
+
+        Args:
+            model_name: 要加载的模型名称（offline 或 streaming），默认使用 default_model
+        """
+        from app.core.config import settings
+
         try:
-            logger.info("开始初始化FunASR模型...")
+            model_name = model_name or self.default_model
+            self.current_model = model_name
 
-            # 检查模型文件是否存在
-            asr_model_path = os.path.join(self.model_dir, "speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch")
-            punc_model_path = os.path.join(self.model_dir, "punc_ct-transformer_zh-cn-common-vocab272727-pytorch")
-            vad_model_path = os.path.join(self.model_dir, "speech_fsmn_vad_zh-cn-16k-common-pytorch")
+            logger.info(f"开始初始化 FunASR 模型: {model_name}")
 
-            if not all(os.path.exists(path) for path in [asr_model_path, punc_model_path, vad_model_path]):
-                raise FileNotFoundError("模型文件不存在，请先下载模型")
+            # 初始化模型管理器
+            if self.model_manager is None:
+                self.model_manager = get_model_manager(max_cached_models=settings.max_cached_models)
 
-            # 初始化真实的FunASR模型
-            logger.info("开始加载FunASR模型...")
+            # 获取模型配置
+            model_config = settings.get_model_config(model_name)
+            if model_config is None:
+                raise ValueError(f"模型 {model_name} 配置不存在")
 
-            # 初始化语音识别模型
-            self.asr_pipeline = pipeline(
-                task=Tasks.auto_speech_recognition,
-                model=asr_model_path
-            )
-            logger.info("语音识别模型加载完成")
+            if not model_config.get("enabled", True):
+                raise ValueError(f"模型 {model_name} 未启用")
 
-            # 初始化标点符号恢复模型
-            self.punc_pipeline = pipeline(
-                task=Tasks.punctuation,
-                model=punc_model_path
-            )
-            logger.info("标点符号模型加载完成")
+            # 使用模型管理器加载模型
+            model_dict = self.model_manager.get_model(model_name, model_config)
 
-            # 初始化VAD模型
-            self.vad_pipeline = pipeline(
-                task=Tasks.voice_activity_detection,
-                model=vad_model_path
-            )
-            logger.info("VAD模型加载完成")
+            if model_dict is None:
+                raise RuntimeError(f"模型 {model_name} 加载失败")
+
+            # 设置当前模型引用
+            self.asr_pipeline = model_dict["asr_pipeline"]
+            self.punc_pipeline = model_dict["punc_pipeline"]
+            self.vad_pipeline = model_dict["vad_pipeline"]
 
             self.is_initialized = True
-            logger.info("FunASR服务初始化完成")
+            logger.info(f"FunASR 服务初始化完成，当前模型: {model_name}")
 
         except Exception as e:
             logger.error(f"模型初始化失败: {e}")
             raise
+
+    async def switch_model(self, model_name: str) -> bool:
+        """
+        切换到指定模型
+
+        Args:
+            model_name: 目标模型名称
+
+        Returns:
+            是否切换成功
+        """
+        try:
+            logger.info(f"切换模型: {self.current_model} -> {model_name}")
+
+            # 重新初始化为目标模型
+            await self.initialize(model_name)
+            return True
+
+        except Exception as e:
+            logger.error(f"切换模型失败: {e}")
+            return False
 
     def _validate_audio(self, audio_data: bytes, sample_rate: int = 16000) -> np.ndarray:
         """验证和预处理音频数据"""
@@ -342,7 +378,13 @@ class FunASRService:
         self.punc_pipeline = None
         self.vad_pipeline = None
         self.is_initialized = False
-        logger.info("FunASR服务资源已清理")
+
+        # 清理模型管理器
+        if self.model_manager is not None:
+            self.model_manager.cleanup()
+            self.model_manager = None
+
+        logger.info("FunASR 服务资源已清理")
 
         # 清理线程池（释放资源）
         global _model_executor
@@ -353,5 +395,20 @@ class FunASRService:
             except Exception as e:
                 logger.warning(f"关闭线程池时出错: {e}")
 
-# 创建全局服务实例
-funasr_service = FunASRService()
+    def get_model_info(self) -> Dict[str, Any]:
+        """
+        获取当前模型信息
+
+        Returns:
+            包含当前模型名称、类型和状态的字典
+        """
+        return {
+            "current_model": self.current_model,
+            "is_initialized": self.is_initialized,
+            "loaded_models": self.model_manager.get_loaded_models() if self.model_manager else []
+        }
+
+
+# 创建全局服务实例（使用配置中的默认模型）
+from app.core.config import settings
+funasr_service = FunASRService(default_model=settings.default_model)

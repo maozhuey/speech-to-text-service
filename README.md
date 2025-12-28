@@ -4,15 +4,16 @@
 
 ## 🌟 特性
 
+- **多模型支持**：支持离线模型（高精度）和流式模型（低延迟）
 - **实时语音识别**：基于WebSocket的实时音频流处理
 - **中文优化**：专门针对中文语音识别优化
-- **Web界面**：简洁美观的Web操作界面
+- **Web界面**：简洁美观的Web操作界面，支持模型选择
 - **标点符号恢复**：自动添加标点符号，提升可读性
 - **VAD语音活动检测**：智能检测语音片段
 - **智能断句**：基于语音停顿自动断句，更自然的转录体验
 - **实时识别状态显示**：识别过程中显示"识别中..."提示，提升用户体验
 - **多连接支持**：支持多个客户端同时连接（当前限制2个）
-- **模拟模式**：开发测试阶段支持模拟识别结果
+- **模型缓存管理**：LRU 缓存策略，最多缓存2个模型，自动释放内存
 
 ## 🏗️ 系统架构
 
@@ -25,17 +26,19 @@
 │   │   │   ├── config.py    # 配置文件
 │   │   │   └── websocket.py # WebSocket处理器
 │   │   ├── services/        # 服务层
-│   │   │   └── funasr_service.py # FunASR语音识别服务
+│   │   │   ├── funasr_service.py   # FunASR语音识别服务
+│   │   │   └── model_manager.py    # 多模型管理器
+│   │   ├── middleware/      # 中间件
 │   │   └── main.py          # FastAPI主应用
-│   └── requirements.txt     # Python依赖
+│   └── tests/               # 测试套件
 ├── frontend/                # 前端界面
-│   ├── index.html          # Web界面
-│   ├── css/                # 样式文件
-│   └── js/                 # JavaScript文件
-├── models/                 # 模型目录
-│   └── damo/               # FunASR模型文件
-├── start_backend.py        # 后端启动脚本
-└── README.md               # 项目说明
+│   ├── index.html           # Web界面
+│   └── css/                 # 样式文件
+├── models/                  # 模型目录
+│   └── damo/                # FunASR离线模型
+│   └── paraformer-zh-streaming/  # 流式模型（可选）
+├── logs/                    # 日志目录
+└── README.md                # 项目说明
 ```
 
 ## 🚀 快速开始
@@ -130,8 +133,26 @@ python -m http.server 8080
 - `SAMPLE_RATE`: 音频采样率（默认：16000）
 - `LOG_LEVEL`: 日志级别（默认：INFO）
 
+### 多模型配置
+- `DEFAULT_MODEL`: 默认使用的模型（`offline` 或 `streaming`，默认：`offline`）
+- `MAX_CACHED_MODELS`: 最大缓存的模型数量（默认：2）
+- `ENABLE_MODEL_SWITCHING`: 是否启用模型切换功能（默认：`true`）
+- `MODEL_PATH`: 离线模型路径
+- `STREAMING_MODEL_PATH`: 流式模型路径（如需使用）
+
+**模型对比：**
+| 模型 | 延迟 | 准确率 | 适用场景 |
+|------|------|--------|----------|
+| 离线模型 (offline) | 5-10秒 | 高 | 会议记录、文档转录 |
+| 流式模型 (streaming) | <300ms | 中高 | 语音输入、实时字幕 |
+
+**使用流式模型：**
+1. 下载流式模型到 `models/paraformer-zh-streaming/` 目录
+2. 在 `.env` 中设置 `STREAMING_MODEL_PATH`
+3. 在前端选择"流式模型"选项
+
 ### VAD智能断句配置
-- `VAD_ENABLED`: 是否启用VAD智能断句（默认：true）
+- `VAD_ENABLED`: 是否启用VAD智能断句（默认：`true`）
   - 启用后：根据说话停顿自动断句（更自然）
   - 禁用后：使用固定时长断句（5秒）
 - `VAD_SILENCE_THRESHOLD_MS`: 静音阈值，连续静音超过此时长触发断句（默认：800毫秒）
@@ -144,22 +165,79 @@ python -m http.server 8080
 连续说话 ≥20秒 → 强制断句
 ```
 
+### CORS安全配置
+- `ALLOWED_ORIGINS`: 允许的跨域来源（逗号分隔）
+- `ALLOWED_METHODS`: 允许的HTTP方法
+- `ALLOWED_HEADERS`: 允许的请求头
+
 ## API接口
 
 ### WebSocket连接
+
+**基础连接（使用默认模型）：**
 ```
-ws://localhost:8000/ws
+ws://localhost:8002/ws
 ```
 
+**指定模型连接：**
+```
+ws://localhost:8002/ws?model=offline    # 离线模型（高精度）
+ws://localhost:8002/ws?model=streaming  # 流式模型（低延迟）
+```
+
+**错误码：**
+- `4002`: 无效的模型名称
+- `4003`: 模型加载失败或未启用
+
 ### REST API
-- `GET /health` - 健康检查
-- `GET /info` - 服务信息
-- `GET /metrics` - 性能指标
+
+#### 模型列表
+```http
+GET /api/v1/models
+```
+
+**响应示例：**
+```json
+{
+  "success": true,
+  "default": "offline",
+  "models": [
+    {
+      "name": "offline",
+      "display_name": "离线模型（高精度）",
+      "type": "offline",
+      "description": "适合会议记录、文档转录，延迟5-10秒",
+      "enabled": true
+    },
+    {
+      "name": "streaming",
+      "display_name": "流式模型（低延迟）",
+      "type": "streaming",
+      "description": "适合语音输入、实时字幕，延迟<300ms",
+      "enabled": false
+    }
+  ]
+}
+```
+
+#### 其他接口
+- `GET /api/v1/health` - 健康检查
+- `GET /api/v1/info` - 服务信息
+- `GET /api/v1/token` - 生成WebSocket访问令牌（可选认证）
 
 ## 性能指标
 
-- 识别延迟：< 2秒
+### 离线模型
+- 识别延迟：5-10秒
 - 识别准确率：> 95%
+- 内存占用：1-2GB
+
+### 流式模型（需下载）
+- 识别延迟：< 300ms
+- 识别准确率：> 90%
+- 内存占用：2-3GB
+
+### 系统资源
 - 并发连接：最多2个
 - CPU使用率：< 80%（M2 Pro）
 - VAD处理性能：160万次/秒
@@ -170,20 +248,21 @@ ws://localhost:8000/ws
 ### 运行测试
 ```bash
 # 运行所有测试
-python backend/tests/test_basic.py
-python backend/tests/test_vad_tracker.py
-python backend/tests/test_vad_service.py
-python backend/tests/test_integration.py
-
-# 或使用pytest
 pytest backend/tests/
+
+# 运行特定测试
+pytest backend/tests/test_model_manager.py -v  # 模型管理器测试
+pytest backend/tests/test_basic.py -v            # 基础功能测试
+pytest backend/tests/test_vad_tracker.py -v      # VAD测试
 ```
 
 ### 测试覆盖
+- **test_model_manager.py**: 模型管理器测试（19个场景）
 - **test_basic.py**: 基础功能测试
 - **test_vad_tracker.py**: VAD状态跟踪器测试（12个场景）
 - **test_vad_service.py**: VAD检测服务测试（9个场景）
 - **test_integration.py**: 端到端集成测试（6个场景）
+- **test_websocket_e2e.py**: WebSocket端到端测试
 
 ### 代码格式化
 ```bash
@@ -193,14 +272,30 @@ flake8 backend/
 
 ## 常见问题
 
+### Q: 如何切换使用流式模型？
+A:
+1. 下载流式模型到 `models/paraformer-zh-streaming/` 目录
+2. 在 `.env` 中设置 `STREAMING_MODEL_PATH=./models/paraformer-zh-streaming`
+3. 在前端界面选择"流式模型"选项
+4. 或在 WebSocket 连接时添加 `?model=streaming` 参数
+
 ### Q: 如何添加新的语音识别模型？
-A: 下载模型文件到 `models/` 目录，并在 `.env` 中配置模型路径。
+A: 在 `.env` 中配置 `MODELS_JSON`，或修改 `app/core/config.py` 中的 `get_models_config()` 方法。
+
+### Q: 支持同时加载多个模型吗？
+A: 是的，使用 LRU 缓存策略，最多缓存2个模型。加载第3个模型时会自动卸载最久未使用的模型。
+
+### Q: 内存不足怎么办？
+A:
+1. 减少 `MAX_CACHED_MODELS` 配置值（最小为1）
+2. 使用离线模型而非流式模型
+3. 减少并发连接数
 
 ### Q: 支持哪些音频格式？
 A: 目前支持 16kHz PCM 格式，其他格式会自动转换。
 
 ### Q: 如何提高识别准确率？
-A: 确保音频质量良好，环境安静，说话清晰。
+A: 确保音频质量良好，环境安静，说话清晰。对于会议记录等场景，建议使用离线模型。
 
 ## 许可证
 

@@ -1,5 +1,5 @@
 from fastapi import WebSocket
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import json
 import logging
 import asyncio
@@ -7,7 +7,7 @@ import time
 from collections import deque
 import uuid
 
-from app.services.funasr_service import funasr_service
+from app.services.funasr_service import funasr_service, FunASRService
 from app.core.vad_tracker import VADStateTracker
 from app.core.config import settings
 
@@ -19,7 +19,14 @@ class WebSocketDisconnectError(Exception):
     pass
 
 class ConnectionManager:
-    """WebSocket连接管理器"""
+    """
+    WebSocket 连接管理器
+
+    支持多模型选择：
+    - 通过 model 参数指定使用哪个识别模型
+    - 验证模型有效性
+    - 错误处理
+    """
 
     def __init__(self, max_connections: int = 2):
         self.active_connections: List[WebSocket] = []
@@ -34,9 +41,20 @@ class ConnectionManager:
         self.audio_sizes: Dict[WebSocket, int] = {}
         # VAD状态跟踪器（每个连接一个）
         self.vad_trackers: Dict[WebSocket, VADStateTracker] = {}
+        # 每个连接的 FunASR 服务实例（支持不同模型）
+        self.funasr_services: Dict[WebSocket, FunASRService] = {}
 
-    async def connect(self, websocket: WebSocket):
-        """接受WebSocket连接"""
+    async def connect(self, websocket: WebSocket, model: Optional[str] = None) -> bool:
+        """
+        接受 WebSocket 连接
+
+        Args:
+            websocket: WebSocket 连接对象
+            model: 指定的模型名称（offline 或 streaming），默认使用配置中的默认模型
+
+        Returns:
+            连接是否成功建立
+        """
         try:
             # 先检查连接数限制
             if len(self.active_connections) >= self.max_connections:
@@ -46,19 +64,47 @@ class ConnectionManager:
                     logger.debug(f"关闭连接失败（连接可能已断开）: {e}")
                 return False
 
+            # 验证模型参数
+            model_name = model or settings.default_model
+            model_config = settings.get_model_config(model_name)
+
+            if model_config is None:
+                await websocket.close(code=4002, reason=f"Invalid model: {model_name}")
+                logger.warning(f"无效的模型名称: {model_name}")
+                return False
+
+            if not model_config.get("enabled", True):
+                await websocket.close(code=4003, reason=f"Model {model_name} is not enabled")
+                logger.warning(f"模型 {model_name} 未启用")
+                return False
+
             # 接受连接
             await websocket.accept()
+
+            # 创建该连接专用的 FunASR 服务实例
+            funasr_instance = FunASRService(default_model=model_name)
+
+            # 初始化指定模型
+            try:
+                await funasr_instance.initialize(model_name)
+            except Exception as e:
+                await websocket.close(code=4003, reason=f"Failed to load model: {model_name}")
+                logger.error(f"加载模型 {model_name} 失败: {e}")
+                return False
 
             self.active_connections.append(websocket)
             self.connection_info[websocket] = {
                 "connected_at": time.time(),
                 "last_activity": time.time(),
-                "session_id": f"session_{int(time.time() * 1000)}"
+                "session_id": f"session_{int(time.time() * 1000)}",
+                "model": model_name
             }
             self.audio_buffers[websocket] = deque(maxlen=1000)  # 保存最近1000个音频块
             self.processing_tasks[websocket] = []
             self.audio_segments[websocket] = []  # 用于累积音频数据
             self.audio_sizes[websocket] = 0  # 初始化音频数据大小
+            self.funasr_services[websocket] = funasr_instance  # 保存该连接的服务实例
+
             # 初始化VAD跟踪器
             if settings.vad_enabled:
                 self.vad_trackers[websocket] = VADStateTracker(
@@ -71,10 +117,12 @@ class ConnectionManager:
             await websocket.send_json({
                 "type": "connection_established",
                 "session_id": self.connection_info[websocket]["session_id"],
+                "model": model_name,
+                "model_display_name": model_config.get("display_name", model_name),
                 "message": "连接成功"
             })
 
-            logger.info(f"WebSocket连接建立，当前连接数: {len(self.active_connections)}")
+            logger.info(f"WebSocket 连接建立 (模型: {model_name})，当前连接数: {len(self.active_connections)}")
             return True
 
         except Exception as e:
@@ -109,7 +157,16 @@ class ConnectionManager:
             self.audio_segments.pop(websocket, None)
             self.audio_sizes.pop(websocket, None)
             self.vad_trackers.pop(websocket, None)  # 清理VAD跟踪器
-            logger.info(f"WebSocket连接断开，当前连接数: {len(self.active_connections)}")
+
+            # 清理该连接的 FunASR 服务实例
+            if websocket in self.funasr_services:
+                try:
+                    self.funasr_services[websocket].cleanup()
+                except Exception as e:
+                    logger.warning(f"清理 FunASR 服务时出错: {e}")
+                self.funasr_services.pop(websocket, None)
+
+            logger.info(f"WebSocket 连接断开，当前连接数: {len(self.active_connections)}")
 
     async def process_audio(self, websocket: WebSocket, audio_data: bytes):
         """处理音频数据"""
@@ -151,10 +208,13 @@ class ConnectionManager:
             should_segment = False
             segment_reason = ""
 
+            # 获取该连接的 FunASR 服务实例
+            funasr_instance = self.funasr_services.get(websocket, funasr_service)
+
             if settings.vad_enabled and websocket in self.vad_trackers:
                 # 使用VAD智能断句
                 try:
-                    vad_result = await funasr_service.detect_voice_activity_realtime(audio_data)
+                    vad_result = await funasr_instance.detect_voice_activity_realtime(audio_data)
                     has_speech = vad_result.get('has_speech', True)
                     should_segment = self.vad_trackers[websocket].process_audio_chunk(
                         has_speech,
@@ -217,8 +277,11 @@ class ConnectionManager:
                 "message": "正在识别语音..."
             })
 
+            # 获取该连接的 FunASR 服务实例
+            funasr_instance = self.funasr_services.get(websocket, funasr_service)
+
             # 调用FunASR进行识别
-            result = await funasr_service.recognize_speech(combined_audio, sample_rate=16000)
+            result = await funasr_instance.recognize_speech(combined_audio, sample_rate=16000)
 
             # 发送识别结果
             await websocket.send_json({

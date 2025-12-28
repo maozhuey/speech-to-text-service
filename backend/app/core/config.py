@@ -1,6 +1,8 @@
 from pydantic_settings import BaseSettings
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
+from pydantic import field_validator
 import os
+import json
 
 class Settings(BaseSettings):
     """应用配置"""
@@ -27,10 +29,78 @@ class Settings(BaseSettings):
         """将允许的请求头字符串转换为列表"""
         return [header.strip() for header in self.allowed_headers.split(",") if header.strip()]
 
-    # FunASR模型配置
-    model_path: str = "./models/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
-    vad_model_path: str = "./models/speech_fsmn_vad_zh-cn-16k-common-pytorch"
-    punc_model_path: str = "./models/punc_ct-transformer_zh-cn-common-vocab272727-pytorch"
+    # ========== 多模型配置 ==========
+    # 默认使用的模型
+    default_model: str = "offline"
+
+    # 最大缓存的模型数量
+    max_cached_models: int = 2
+
+    # 是否启用模型切换功能
+    enable_model_switching: bool = True
+
+    # FunASR 模型配置（保留向后兼容，路径相对于 backend 目录）
+    model_path: str = "../models/damo/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
+    vad_model_path: str = "../models/damo/speech_fsmn_vad_zh-cn-16k-common-pytorch"
+    punc_model_path: str = "../models/damo/punc_ct-transformer_zh-cn-common-vocab272727-pytorch"
+
+    # 流式模型配置（路径相对于 backend 目录）
+    streaming_model_path: str = "../models/paraformer-zh-streaming/iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online"
+
+    # 模型配置字典（可通过环境变量 MODELS_JSON 覆盖）
+    # 格式: JSON字符串，包含各模型的配置信息
+    models_json: Optional[str] = None
+
+    def get_models_config(self) -> Dict[str, Dict[str, Any]]:
+        """
+        获取模型配置字典
+
+        如果环境变量 MODELS_JSON 存在，则解析它；
+        否则返回默认配置。
+        """
+        if self.models_json:
+            try:
+                return json.loads(self.models_json)
+            except (json.JSONDecodeError, TypeError) as e:
+                import logging
+                logging.warning(f"解析 MODELS_JSON 失败: {e}，使用默认配置")
+
+        # 检测流式模型是否可用
+        import os
+        streaming_enabled = os.path.exists(self.streaming_model_path)
+
+        # 默认模型配置
+        return {
+            "offline": {
+                "name": "paraformer-zh-16k-offline",
+                "display_name": "离线模型（高精度）",
+                "path": self.model_path,
+                "type": "offline",
+                "description": "适合会议记录、文档转录，延迟5-10秒",
+                "enabled": True
+            },
+            "streaming": {
+                "name": "paraformer-zh-streaming",
+                "display_name": "流式模型（低延迟）",
+                "path": self.streaming_model_path,
+                "type": "streaming",
+                "description": "适合语音输入、实时字幕，延迟<300ms",
+                "enabled": streaming_enabled  # 自动检测是否可用
+            }
+        }
+
+    def get_model_config(self, model_name: str) -> Optional[Dict[str, Any]]:
+        """
+        获取指定模型的配置
+
+        Args:
+            model_name: 模型名称（offline 或 streaming）
+
+        Returns:
+            模型配置字典，如果模型不存在则返回 None
+        """
+        models = self.get_models_config()
+        return models.get(model_name)
 
     # 音频配置
     sample_rate: int = 16000
