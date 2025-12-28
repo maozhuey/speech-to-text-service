@@ -38,9 +38,9 @@ app = FastAPI(
 # 配置CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:9000", "http://127.0.0.1:9000"],
+    allow_origins=["*"],  # 允许所有来源，方便开发测试
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE"],  # 限制允许的方法
+    allow_methods=["*"],  # 允许所有方法
     allow_headers=["*"],
 )
 
@@ -64,10 +64,13 @@ async def websocket_endpoint(websocket: WebSocket):
             try:
                 data = await websocket.receive_bytes()
                 await websocket_manager.process_audio(websocket, data)
+            except WebSocketDisconnect as e:
+                logger.info(f"客户端断开连接，关闭代码: {e.code}")
+                break
             except Exception as e:
-                logger.error(f"处理音频数据失败: {e}")
+                logger.error(f"处理音频数据失败: {e}", exc_info=True)
                 # 如果是连接断开相关的错误，退出循环
-                if "disconnect" in str(e).lower() or "connection" in str(e).lower():
+                if "disconnect" in str(e).lower() or "connection" in str(e).lower() or str(e).isdigit():
                     break
                 # 发送错误消息给客户端
                 try:
@@ -81,8 +84,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 # 不中断连接，继续接收数据
                 continue
 
-    except WebSocketDisconnect:
-        logger.info("客户端主动断开连接")
+    except WebSocketDisconnect as e:
+        logger.info(f"客户端主动断开连接，关闭代码: {e.code}")
     except Exception as e:
         logger.error(f"WebSocket错误: {e}")
     finally:

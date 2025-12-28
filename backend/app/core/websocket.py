@@ -124,7 +124,7 @@ class ConnectionManager:
 
             # 累积一定量的音频数据后进行识别（例如每2秒）
             total_size = sum(len(chunk) for chunk in self.audio_segments[websocket])
-            if total_size > 64000:  # 约2秒的16kHz 16位音频
+            if total_size >= 64000:  # 约2秒的16kHz 16位音频
                 # 创建异步任务进行语音识别
                 task = asyncio.create_task(
                     self._recognize_audio_segment(websocket, self.audio_segments[websocket][:])

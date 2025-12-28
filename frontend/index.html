@@ -64,14 +64,16 @@
         class SpeechToTextApp {
             constructor() {
                 this.ws = null;
-                this.mediaRecorder = null;
                 this.audioStream = null;
                 this.isRecording = false;
                 this.currentSentence = null;
                 this.reconnectAttempts = 0;
                 this.maxReconnectAttempts = 10;
-                this.audioChunks = []; // 累积音频数据
-                this.audioContext = null; // 音频上下文复用
+                this.audioContext = null;
+                this.scriptProcessor = null;
+                this.audioBuffer = []; // 缓冲PCM数据
+                this.bufferSize = 0; // 缓冲区大小
+                this.targetBufferSize = 64000; // 目标缓冲区大小（约2秒）
 
                 this.initElements();
                 this.initEventListeners();
@@ -158,35 +160,53 @@
                     });
 
                     // 创建音频上下文
-                    this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
-
-                    // 初始化音频数据累积
-                    this.audioChunks = [];
-
-                    // 创建录音器
-                    this.mediaRecorder = new MediaRecorder(this.audioStream, {
-                        mimeType: 'audio/webm'
+                    this.audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                        sampleRate: 16000
                     });
 
-                    // 设置数据处理
-                    this.mediaRecorder.ondataavailable = (event) => {
-                        if (event.data.size > 0) {
-                            // 累积音频数据
-                            this.audioChunks.push(event.data);
+                    // 创建音频源
+                    const source = this.audioContext.createMediaStreamSource(this.audioStream);
 
-                            // 当累积足够数据时进行转换和发送
-                            this.processAccumulatedAudio();
+                    // 创建脚本处理器（已废弃但兼容性好）
+                    const bufferSize = 4096;
+                    this.scriptProcessor = this.audioContext.createScriptProcessor(bufferSize, 1, 1);
+
+                    // 处理音频数据
+                    this.scriptProcessor.onaudioprocess = (event) => {
+                        if (!this.isRecording) return;
+
+                        const inputBuffer = event.inputBuffer;
+                        const inputData = inputBuffer.getChannelData(0);
+
+                        // 转换为16位PCM
+                        const pcmData = new Int16Array(inputData.length);
+                        for (let i = 0; i < inputData.length; i++) {
+                            const s = Math.max(-1, Math.min(1, inputData[i]));
+                            pcmData[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                        }
+
+                        // 累积音频数据
+                        this.audioBuffer.push(pcmData);
+                        this.bufferSize += pcmData.byteLength;
+
+                        // 当累积足够数据时发送
+                        if (this.bufferSize >= this.targetBufferSize) {
+                            this.sendBufferedAudio();
                         }
                     };
 
-                    // 开始录音
-                    this.mediaRecorder.start(1000); // 每1秒收集一次数据
+                    // 连接节点
+                    source.connect(this.scriptProcessor);
+                    this.scriptProcessor.connect(this.audioContext.destination);
+
                     this.isRecording = true;
 
                     // 更新UI
                     this.startBtn.classList.add('hidden');
                     this.stopBtn.classList.remove('hidden');
                     this.startBtn.disabled = true;
+
+                    console.log('录音开始');
 
                 } catch (error) {
                     console.error('录音启动失败:', error);
@@ -195,14 +215,19 @@
             }
 
             stopRecording() {
-                if (this.mediaRecorder && this.isRecording) {
-                    this.mediaRecorder.stop();
+                if (this.isRecording) {
                     this.isRecording = false;
 
-                    // 处理剩余的音频数据
-                    setTimeout(() => {
-                        this.processAccumulatedAudio(true); // 强制处理所有数据
-                    }, 100);
+                    // 发送剩余的音频数据
+                    if (this.bufferSize > 0) {
+                        this.sendBufferedAudio();
+                    }
+
+                    // 断开音频处理节点
+                    if (this.scriptProcessor) {
+                        this.scriptProcessor.disconnect();
+                        this.scriptProcessor = null;
+                    }
 
                     // 停止音频流
                     if (this.audioStream) {
@@ -219,82 +244,37 @@
                     this.startBtn.classList.remove('hidden');
                     this.stopBtn.classList.add('hidden');
                     this.startBtn.disabled = false;
+
+                    console.log('录音停止');
                 }
             }
 
-            async processAccumulatedAudio(force = false) {
-                // 只在有足够数据或强制处理时才处理
-                const totalSize = this.audioChunks.reduce((sum, chunk) => sum + chunk.size, 0);
-
-                if (!force && totalSize < 50000) { // 至少50KB才处理
-                    return;
-                }
-
-                if (this.audioChunks.length === 0) {
-                    return;
-                }
+            sendBufferedAudio() {
+                if (this.audioBuffer.length === 0) return;
 
                 try {
-                    // 合并所有音频块
-                    const combinedBlob = new Blob(this.audioChunks, { type: 'audio/webm' });
-                    this.audioChunks = []; // 清空累积的音频块
+                    // 合并所有PCM数据
+                    const totalLength = this.audioBuffer.reduce((sum, arr) => sum + arr.length, 0);
+                    const combinedPcm = new Int16Array(totalLength);
+                    let offset = 0;
 
-                    // 转换并发送音频
-                    await this.convertAndSendAudio(combinedBlob);
-
-                } catch (error) {
-                    console.error('音频处理失败:', error);
-                    // 清空音频块避免重复处理错误数据
-                    this.audioChunks = [];
-                }
-            }
-
-            async convertAndSendAudio(blob) {
-                try {
-                    // 将WebM转换为PCM格式
-                    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-                    const arrayBuffer = await blob.arrayBuffer();
-                    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-
-                    // 转换为16kHz单声道16位PCM
-                    const targetSampleRate = 16000;
-                    const offlineContext = new OfflineAudioContext(1, audioBuffer.duration * targetSampleRate, targetSampleRate);
-
-                    // 创建源节点
-                    const source = offlineContext.createBufferSource();
-                    source.buffer = audioBuffer;
-
-                    // 连接到输出
-                    source.connect(offlineContext.destination);
-                    source.start();
-
-                    // 渲染音频
-                    const renderedBuffer = await offlineContext.startRendering();
-
-                    // 转换为16位PCM
-                    const channelData = renderedBuffer.getChannelData(0);
-                    const pcmData = new Int16Array(channelData.length);
-                    for (let i = 0; i < channelData.length; i++) {
-                        // 将[-1, 1]范围的浮点数转换为[-32768, 32767]范围的整数
-                        const s = Math.max(-1, Math.min(1, channelData[i]));
-                        pcmData[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                    for (const arr of this.audioBuffer) {
+                        combinedPcm.set(arr, offset);
+                        offset += arr.length;
                     }
 
                     // 发送PCM数据
                     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-                        this.ws.send(pcmData.buffer);
+                        this.ws.send(combinedPcm.buffer);
+                        console.log(`发送音频数据: ${combinedPcm.byteLength} 字节`);
                     }
 
-                    // 关闭音频上下文
-                    audioContext.close();
-                    offlineContext.close();
+                    // 清空缓冲区
+                    this.audioBuffer = [];
+                    this.bufferSize = 0;
 
                 } catch (error) {
-                    console.error('音频转换失败:', error);
-                    // 如果转换失败，发送空数据以避免崩溃
-                    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-                        this.ws.send(new ArrayBuffer(0));
-                    }
+                    console.error('发送音频数据失败:', error);
                 }
             }
 
