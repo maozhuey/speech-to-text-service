@@ -8,6 +8,8 @@ from collections import deque
 import uuid
 
 from app.services.funasr_service import funasr_service
+from app.core.vad_tracker import VADStateTracker
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +27,8 @@ class ConnectionManager:
         self.max_audio_size_per_connection = 10 * 1024 * 1024
         # 当前连接的音频数据大小
         self.audio_sizes: Dict[WebSocket, int] = {}
+        # VAD状态跟踪器（每个连接一个）
+        self.vad_trackers: Dict[WebSocket, VADStateTracker] = {}
 
     async def connect(self, websocket: WebSocket):
         """接受WebSocket连接"""
@@ -50,6 +54,13 @@ class ConnectionManager:
             self.processing_tasks[websocket] = []
             self.audio_segments[websocket] = []  # 用于累积音频数据
             self.audio_sizes[websocket] = 0  # 初始化音频数据大小
+            # 初始化VAD跟踪器
+            if settings.vad_enabled:
+                self.vad_trackers[websocket] = VADStateTracker(
+                    silence_threshold_ms=settings.vad_silence_threshold_ms,
+                    max_segment_duration_ms=settings.vad_max_segment_duration_ms
+                )
+                logger.info(f"VAD已启用，阈值: {settings.vad_silence_threshold_ms}ms")
 
             # 发送连接成功消息
             await websocket.send_json({
@@ -84,6 +95,7 @@ class ConnectionManager:
 
             self.audio_segments.pop(websocket, None)
             self.audio_sizes.pop(websocket, None)
+            self.vad_trackers.pop(websocket, None)  # 清理VAD跟踪器
             logger.info(f"WebSocket连接断开，当前连接数: {len(self.active_connections)}")
 
     async def process_audio(self, websocket: WebSocket, audio_data: bytes):
@@ -122,9 +134,36 @@ class ConnectionManager:
                     })
                     return
 
-            # 累积一定量的音频数据后进行识别（例如每5秒）
-            total_size = sum(len(chunk) for chunk in self.audio_segments[websocket])
-            if total_size >= 160000:  # 约5秒的16kHz 16位音频
+            # VAD智能断句或固定时长断句
+            should_segment = False
+            segment_reason = ""
+
+            if settings.vad_enabled and websocket in self.vad_trackers:
+                # 使用VAD智能断句
+                try:
+                    vad_result = await funasr_service.detect_voice_activity_realtime(audio_data)
+                    has_speech = vad_result.get('has_speech', True)
+                    should_segment = self.vad_trackers[websocket].process_audio_chunk(
+                        has_speech,
+                        len(audio_data)
+                    )
+                    segment_reason = "VAD检测"
+                except Exception as e:
+                    logger.warning(f"VAD检测失败，回退到固定时长: {e}")
+                    # 回退到固定时长断句
+                    total_size = sum(len(chunk) for chunk in self.audio_segments[websocket])
+                    should_segment = total_size >= 160000
+                    segment_reason = "固定时长"
+            else:
+                # 使用固定时长断句（约5秒）
+                total_size = sum(len(chunk) for chunk in self.audio_segments[websocket])
+                should_segment = total_size >= 160000
+                segment_reason = "固定时长"
+
+            # 触发断句
+            if should_segment and self.audio_segments[websocket]:
+                logger.info(f"触发断句（{segment_reason}），音频数据: {sum(len(chunk) for chunk in self.audio_segments[websocket])} 字节")
+
                 # 创建异步任务进行语音识别
                 task = asyncio.create_task(
                     self._recognize_audio_segment(websocket, self.audio_segments[websocket][:])
@@ -136,6 +175,10 @@ class ConnectionManager:
 
                 # 清空音频片段列表
                 self.audio_segments[websocket] = []
+
+                # 重置VAD跟踪器
+                if settings.vad_enabled and websocket in self.vad_trackers:
+                    self.vad_trackers[websocket].reset()
 
         except Exception as e:
             logger.error(f"音频处理错误: {e}")

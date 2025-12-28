@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     # 环境配置
     debug: bool = False
 
+    # VAD断句配置
+    vad_silence_threshold_ms: int = 800  # 连续静音时长阈值（毫秒）
+    vad_max_segment_duration_ms: int = 20000  # 单段最大时长（毫秒）
+    vad_enabled: bool = True  # 是否启用VAD断句
+
     model_config = {
         "env_file": ".env",
         "case_sensitive": False,

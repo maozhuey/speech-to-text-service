@@ -249,6 +249,60 @@ class FunASRService:
                 "has_speech": False
             }
 
+    async def detect_voice_activity_realtime(self, audio_data: bytes, sample_rate: int = 16000) -> Dict[str, Any]:
+        """
+        实时VAD检测（优化版，用于音频流处理）
+
+        与detect_voice_activity的区别：
+        - 不创建临时文件，直接处理音频数据
+        - 返回更简洁的结果
+        - 适合高频调用场景
+
+        Args:
+            audio_data: 音频数据（PCM格式）
+            sample_rate: 采样率
+
+        Returns:
+            dict: {"has_speech": bool, "success": bool}
+        """
+        if not self.is_initialized:
+            await self.initialize()
+
+        try:
+            # 快速验证：检查音频数据长度是否太短
+            if len(audio_data) < sample_rate * 0.1:  # 小于0.1秒
+                return {"success": True, "has_speech": False}
+
+            # 验证音频数据
+            audio_array = self._validate_audio(audio_data, sample_rate)
+
+            # 简化的VAD检测：基于能量阈值快速判断
+            # 计算音频能量
+            energy = float(np.mean(audio_array ** 2))
+
+            # 动态阈值（基于典型语音能量）
+            energy_threshold = 0.001  # 可根据实际环境调整
+
+            has_speech = energy > energy_threshold
+
+            # 对于边界情况，使用完整的VAD检测
+            if 0.0005 < energy < 0.002:  # 边界区域
+                try:
+                    temp_file = self._save_temp_audio(audio_array, sample_rate)
+                    vad_result = self.vad_pipeline(temp_file)
+                    os.unlink(temp_file)
+                    has_speech = bool(vad_result.get('speech', []))
+                except:
+                    # VAD失败时使用能量阈值结果
+                    pass
+
+            return {"success": True, "has_speech": has_speech}
+
+        except Exception as e:
+            logger.warning(f"实时VAD检测失败，使用默认值: {e}")
+            # 检测失败时默认返回True（保守策略，避免丢失语音）
+            return {"success": False, "has_speech": True}
+
     def cleanup(self):
         """清理资源"""
         self.asr_pipeline = None

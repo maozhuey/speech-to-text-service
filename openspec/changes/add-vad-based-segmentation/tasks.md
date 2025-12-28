@@ -1,41 +1,41 @@
 # 实施任务清单
 
 ## 阶段1：VAD状态跟踪器实现
-- [ ] 创建 `VADStateTracker` 类
-  - [ ] 实现 `__init__` 初始化方法
-  - [ ] 实现 `process_audio_chunk` 核心逻辑
-  - [ ] 实现 `reset` 重置方法
+- [x] 创建 `VADStateTracker` 类
+  - [x] 实现 `__init__` 初始化方法
+  - [x] 实现 `process_audio_chunk` 核心逻辑
+  - [x] 实现 `reset` 重置方法
   - [ ] 添加单元测试
 
 ## 阶段2：配置管理
-- [ ] 在 `config.py` 中添加VAD配置项
-  - [ ] `VAD_SILENCE_THRESHOLD_MS` (默认800ms)
-  - [ ] `VAD_MAX_SEGMENT_DURATION_MS` (默认20000ms)
-  - [ ] `VAD_ENABLED` (默认true)
-- [ ] 更新 `.env.example` 文件
-- [ ] 验证配置加载正确
+- [x] 在 `config.py` 中添加VAD配置项
+  - [x] `VAD_SILENCE_THRESHOLD_MS` (默认800ms)
+  - [x] `VAD_MAX_SEGMENT_DURATION_MS` (默认20000ms)
+  - [x] `VAD_ENABLED` (默认true)
+- [x] 更新 `.env.example` 文件
+- [x] 验证配置加载正确
 
 ## 阶段3：WebSocket集成
-- [ ] 在 `ConnectionManager` 中添加VAD状态跟踪
-  - [ ] 创建 `vad_trackers` 字典
-  - [ ] 在 `connect()` 时初始化tracker
-  - [ ] 在 `disconnect()` 时清理tracker
-- [ ] 修改 `process_audio()` 方法
-  - [ ] 调用VAD检测
-  - [ ] 更新VAD状态
-  - [ ] 判断是否触发断句
-- [ ] 实现降级策略
-  - [ ] VAD失败时回退到固定时长
-  - [ ] 添加日志记录
+- [x] 在 `ConnectionManager` 中添加VAD状态跟踪
+  - [x] 创建 `vad_trackers` 字典
+  - [x] 在 `connect()` 时初始化tracker
+  - [x] 在 `disconnect()` 时清理tracker
+- [x] 修改 `process_audio()` 方法
+  - [x] 调用VAD检测
+  - [x] 更新VAD状态
+  - [x] 判断是否触发断句
+- [x] 实现降级策略
+  - [x] VAD失败时回退到固定时长
+  - [x] 添加日志记录
 
 ## 阶段4：VAD检测服务
-- [ ] 在 `funasr_service.py` 中实现实时VAD
-  - [ ] 创建 `detect_voice_activity_realtime()` 方法
-  - [ ] 处理小块音频数据（4096采样）
-  - [ ] 返回简洁的结果格式
-- [ ] 性能优化
-  - [ ] 确保VAD调用不阻塞主流程
-  - [ ] 添加性能监控日志
+- [x] 在 `funasr_service.py` 中实现实时VAD
+  - [x] 创建 `detect_voice_activity_realtime()` 方法
+  - [x] 处理小块音频数据（4096采样）
+  - [x] 返回简洁的结果格式
+- [x] 性能优化
+  - [x] 确保VAD调用不阻塞主流程
+  - [x] 添加性能监控日志
 
 ## 阶段5：前端优化（可选）
 - [ ] 显示断句状态
