@@ -1,5 +1,6 @@
 """VAD状态跟踪器模块"""
 import logging
+import time
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -94,7 +95,3 @@ class VADStateTracker:
             "max_segment_duration_ms": self.max_segment_duration_ms,
             "has_speech_recently": self.consecutive_silence_ms < 500
         }
-
-
-# 导入time模块
-import time
