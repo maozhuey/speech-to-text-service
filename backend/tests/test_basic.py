@@ -14,43 +14,35 @@ sys.path.insert(0, str(project_root))
 
 def test_imports():
     """测试主要模块是否可以正常导入"""
-    try:
-        from app.core.config import settings
-        from app.core.websocket import ConnectionManager
-        print("✓ 核心模块导入成功")
-        return True
-    except ImportError as e:
-        print(f"✗ 模块导入失败: {e}")
-        return False
+    from app.core.config import settings
+    from app.core.websocket import ConnectionManager
+    # 导入成功则测试通过
+    assert settings is not None
+    assert ConnectionManager is not None
 
 def test_config():
     """测试配置加载"""
-    try:
-        from app.core.config import settings
-        print(f"✓ 配置加载成功:")
-        print(f"  - 最大连接数: {settings.max_connections}")
-        print(f"  - 采样率: {settings.sample_rate}")
-        print(f"  - 日志级别: {settings.log_level}")
-        return True
-    except Exception as e:
-        print(f"✗ 配置加载失败: {e}")
-        return False
+    from app.core.config import settings
+
+    # 验证配置值
+    assert settings.max_connections > 0
+    assert settings.sample_rate > 0
+    assert settings.log_level in ["DEBUG", "INFO", "WARNING", "ERROR"]
+
+    # 验证新的CORS配置
+    assert hasattr(settings, 'get_allowed_origins_list')
+    origins = settings.get_allowed_origins_list()
+    assert isinstance(origins, list)
 
 def test_websocket_manager():
     """测试WebSocket连接管理器"""
-    try:
-        from app.core.websocket import ConnectionManager
-        manager = ConnectionManager(max_connections=2)
+    from app.core.websocket import ConnectionManager
 
-        assert manager.max_connections == 2
-        assert manager.get_connection_count() == 0
-        assert manager.is_connection_available() == True
+    manager = ConnectionManager(max_connections=2)
 
-        print("✓ WebSocket连接管理器测试通过")
-        return True
-    except Exception as e:
-        print(f"✗ WebSocket连接管理器测试失败: {e}")
-        return False
+    assert manager.max_connections == 2
+    assert manager.get_connection_count() == 0
+    assert manager.is_connection_available() is True
 
 def main():
     """运行所有测试"""

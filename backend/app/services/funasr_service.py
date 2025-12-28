@@ -5,12 +5,19 @@ import wave
 import tempfile
 import numpy as np
 from typing import Dict, Any, Optional, List
+from concurrent.futures import ThreadPoolExecutor
+import asyncio
 
 from modelscope.pipelines import pipeline
 from modelscope.utils.constant import Tasks
 import torch
 
 logger = logging.getLogger(__name__)
+
+# 全局线程池，用于执行阻塞的模型推理
+# 限制线程数以避免资源耗尽
+_model_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="funasr_model")
+
 
 class FunASRService:
     """FunASR语音识别服务类"""
@@ -128,9 +135,16 @@ class FunASRService:
             # 保存临时音频文件
             temp_file = self._save_temp_audio(audio_array, sample_rate)
 
-            # 真实语音识别
+            # 使用线程池执行阻塞的模型推理，避免阻塞事件循环
             logger.info("开始语音识别...")
-            asr_result = self.asr_pipeline(temp_file)
+            loop = asyncio.get_event_loop()
+
+            # 在线程池中执行ASR识别
+            asr_result = await loop.run_in_executor(
+                _model_executor,
+                self.asr_pipeline,
+                temp_file
+            )
 
             # 提取识别文本
             if isinstance(asr_result, dict) and 'text' in asr_result:
@@ -147,7 +161,12 @@ class FunASRService:
             if text:
                 try:
                     logger.info(f"识别文本（加标点前）: {text}")
-                    punc_result = self.punc_pipeline(text)
+                    # 在线程池中执行标点符号恢复
+                    punc_result = await loop.run_in_executor(
+                        _model_executor,
+                        self.punc_pipeline,
+                        text
+                    )
                     logger.info(f"标点结果: {punc_result}")
                     if isinstance(punc_result, dict) and 'text' in punc_result:
                         text = punc_result['text']
@@ -192,8 +211,12 @@ class FunASRService:
             if temp_file and os.path.exists(temp_file):
                 try:
                     os.unlink(temp_file)
-                except:
-                    pass
+                    logger.debug(f"已清理临时文件: {temp_file}")
+                except OSError as e:
+                    logger.error(f"清理临时文件失败 {temp_file}: {e}")
+                    # 可以考虑添加到清理队列，定期重试
+                except Exception as e:
+                    logger.error(f"清理临时文件时发生意外错误 {temp_file}: {e}")
 
     async def batch_recognize(self, audio_chunks: List[bytes], sample_rate: int = 16000) -> List[Dict[str, Any]]:
         """批量识别多个音频片段"""
@@ -287,14 +310,23 @@ class FunASRService:
 
             # 对于边界情况，使用完整的VAD检测
             if 0.0005 < energy < 0.002:  # 边界区域
+                temp_file = None
                 try:
                     temp_file = self._save_temp_audio(audio_array, sample_rate)
                     vad_result = self.vad_pipeline(temp_file)
-                    os.unlink(temp_file)
                     has_speech = bool(vad_result.get('speech', []))
-                except:
-                    # VAD失败时使用能量阈值结果
-                    pass
+                except (OSError, IOError) as file_err:
+                    logger.warning(f"VAD文件操作失败: {file_err}，使用能量阈值结果")
+                except Exception as vad_err:
+                    logger.warning(f"VAD检测失败: {vad_err}，使用能量阈值结果")
+                finally:
+                    # 确保临时文件被清理
+                    if temp_file and os.path.exists(temp_file):
+                        try:
+                            os.unlink(temp_file)
+                            logger.debug(f"已清理VAD临时文件: {temp_file}")
+                        except OSError as e:
+                            logger.error(f"清理VAD临时文件失败 {temp_file}: {e}")
 
             return {"success": True, "has_speech": has_speech}
 
@@ -305,11 +337,21 @@ class FunASRService:
 
     def cleanup(self):
         """清理资源"""
+        # 清理模型资源
         self.asr_pipeline = None
         self.punc_pipeline = None
         self.vad_pipeline = None
         self.is_initialized = False
         logger.info("FunASR服务资源已清理")
+
+        # 清理线程池（释放资源）
+        global _model_executor
+        if _model_executor is not None:
+            try:
+                _model_executor.shutdown(wait=False)
+                logger.info("模型线程池已关闭")
+            except Exception as e:
+                logger.warning(f"关闭线程池时出错: {e}")
 
 # 创建全局服务实例
 funasr_service = FunASRService()

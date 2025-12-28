@@ -1,0 +1,71 @@
+# Mutation Testing Configuration
+# 使用pytest-mut进行突变测试
+
+[mutate]
+# 要进行突变测试的模块
+targets = [
+    "app/core/vad_tracker.py",
+    "app/core/config.py",
+    "app/middleware/rate_limit.py",
+    "app/middleware/websocket_auth.py",
+]
+
+# 排除的函数/类（例如已知的复杂算法）
+exclude = [
+    "app.core.vad_tracker.VADStateTracker.process_audio_chunk",  # 如果测试覆盖率不足
+]
+
+# 突变测试的配置选项
+[config]
+# 置信度阈值（低于此值的突变会被标记）
+confidence_threshold = 80
+
+# 超时时间（秒）
+timeout = 300
+
+# 并行运行的worker数量
+workers = 4
+
+# 输出格式
+output_format = "html"
+
+# 突变类型（默认启用的突变）
+[mutations]
+# 算术运算符突变
+arithmetic_operators = true
+# 比较运算符突变
+comparison_operators = true
+# 布尔运算符突变
+boolean_operators = true
+# 位运算符突变
+bitwise_operators = false
+# 一元运算符突变
+unary_operators = true
+# 字符串常量突变
+string_constants = false
+# 数字常量突变
+number_constants = true
+# 函数调用突变
+function_calls = false
+# 返回语句突变
+return_statements = true
+# break/continue语句突变
+loop_statements = true
+
+# 报告配置
+[reporting]
+# 生成HTML报告
+html_report = true
+# 生成JSON报告
+json_report = true
+# 报告输出目录
+output_dir = ".mutation-report"
+# 详细级别（quiet, normal, verbose）
+verbosity = "normal"
+
+# 与CI/CD集成
+[ci]
+# 在突变测试失败时退出
+fail_on_mutants = true
+# 允许的幸存突变比例（0-100）
+max_surviving_mutants = 10

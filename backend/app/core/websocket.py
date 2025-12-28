@@ -13,6 +13,11 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+
+class WebSocketDisconnectError(Exception):
+    """WebSocket断开连接异常"""
+    pass
+
 class ConnectionManager:
     """WebSocket连接管理器"""
 
@@ -37,8 +42,8 @@ class ConnectionManager:
             if len(self.active_connections) >= self.max_connections:
                 try:
                     await websocket.close(code=1013, reason=f"已达到最大连接数限制 ({self.max_connections})")
-                except:
-                    pass
+                except (WebSocketDisconnect, RuntimeError, OSError) as e:
+                    logger.debug(f"关闭连接失败（连接可能已断开）: {e}")
                 return False
 
             # 接受连接
@@ -73,11 +78,11 @@ class ConnectionManager:
             return True
 
         except Exception as e:
-            logger.error(f"连接建立失败: {e}")
+            logger.error(f"连接建立失败: {e}", exc_info=True)
             try:
                 await websocket.close(code=1011, reason="服务器内部错误")
-            except:
-                pass
+            except (WebSocketDisconnect, RuntimeError, OSError) as close_err:
+                logger.debug(f"关闭连接失败（连接可能已断开）: {close_err}")
             return False
 
     async def disconnect(self, websocket: WebSocket):
@@ -87,11 +92,19 @@ class ConnectionManager:
             self.connection_info.pop(websocket, None)
             self.audio_buffers.pop(websocket, None)
 
-            # 取消所有正在处理的任务
+            # 取消所有正在处理的任务，并等待完成
             if websocket in self.processing_tasks:
-                for task in self.processing_tasks[websocket]:
+                tasks = self.processing_tasks.pop(websocket, [])
+                for task in tasks:
                     task.cancel()
-                self.processing_tasks.pop(websocket, None)
+                    try:
+                        # 等待任务完成，最多等待5秒
+                        await asyncio.wait_for(task, timeout=5.0)
+                    except (asyncio.CancelledError, asyncio.TimeoutError):
+                        # 任务被取消或超时，这是预期的
+                        pass
+                    except Exception as e:
+                        logger.warning(f"取消任务时发生错误: {e}")
 
             self.audio_segments.pop(websocket, None)
             self.audio_sizes.pop(websocket, None)

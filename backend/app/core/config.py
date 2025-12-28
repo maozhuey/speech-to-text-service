@@ -1,5 +1,5 @@
 from pydantic_settings import BaseSettings
-from typing import Optional
+from typing import Optional, List
 import os
 
 class Settings(BaseSettings):
@@ -9,6 +9,23 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8002
     max_connections: int = 2
+
+    # CORS安全配置
+    allowed_origins: str = "http://localhost:8080,http://127.0.0.1:8080"  # 允许的来源（逗号分隔）
+    allowed_methods: str = "GET,POST,OPTIONS"  # 允许的HTTP方法
+    allowed_headers: str = "Content-Type,Authorization"  # 允许的请求头
+
+    def get_allowed_origins_list(self) -> List[str]:
+        """将允许的来源字符串转换为列表"""
+        return [origin.strip() for origin in self.allowed_origins.split(",") if origin.strip()]
+
+    def get_allowed_methods_list(self) -> List[str]:
+        """将允许的方法字符串转换为列表"""
+        return [method.strip() for method in self.allowed_methods.split(",") if method.strip()]
+
+    def get_allowed_headers_list(self) -> List[str]:
+        """将允许的请求头字符串转换为列表"""
+        return [header.strip() for header in self.allowed_headers.split(",") if header.strip()]
 
     # FunASR模型配置
     model_path: str = "./models/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
