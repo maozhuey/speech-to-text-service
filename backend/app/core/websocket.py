@@ -1,4 +1,4 @@
-from fastapi import WebSocket
+from fastapi import WebSocket, WebSocketDisconnect
 from typing import List, Dict, Any, Optional
 import json
 import logging
@@ -18,6 +18,7 @@ class WebSocketDisconnectError(Exception):
     """WebSocket断开连接异常"""
     pass
 
+
 class ConnectionManager:
     """
     WebSocket 连接管理器
@@ -26,7 +27,11 @@ class ConnectionManager:
     - 通过 model 参数指定使用哪个识别模型
     - 验证模型有效性
     - 错误处理
+    - 消息大小限制和违规计数
     """
+
+    # 每个连接最大允许违规次数
+    MAX_VIOLATION_COUNT = 5
 
     def __init__(self, max_connections: int = 2):
         self.active_connections: List[WebSocket] = []
@@ -43,10 +48,17 @@ class ConnectionManager:
         self.vad_trackers: Dict[WebSocket, VADStateTracker] = {}
         # 每个连接的 FunASR 服务实例（支持不同模型）
         self.funasr_services: Dict[WebSocket, FunASRService] = {}
+        # 违规计数：记录每个连接发送超大消息的次数
+        self.violation_counts: Dict[WebSocket, int] = {}
 
     async def connect(self, websocket: WebSocket, model: Optional[str] = None) -> bool:
         """
         接受 WebSocket 连接
+
+        使用原子性操作确保连接状态一致性：
+        - 所有状态先准备完毕
+        - 原子性地添加到所有数据结构
+        - 异常时自动回滚
 
         Args:
             websocket: WebSocket 连接对象
@@ -55,83 +67,145 @@ class ConnectionManager:
         Returns:
             连接是否成功建立
         """
-        try:
-            # 先检查连接数限制
-            if len(self.active_connections) >= self.max_connections:
-                try:
-                    await websocket.close(code=1013, reason=f"已达到最大连接数限制 ({self.max_connections})")
-                except (WebSocketDisconnect, RuntimeError, OSError) as e:
-                    logger.debug(f"关闭连接失败（连接可能已断开）: {e}")
-                return False
-
-            # 验证模型参数
-            model_name = model or settings.default_model
-            model_config = settings.get_model_config(model_name)
-
-            if model_config is None:
-                await websocket.close(code=4002, reason=f"Invalid model: {model_name}")
-                logger.warning(f"无效的模型名称: {model_name}")
-                return False
-
-            if not model_config.get("enabled", True):
-                await websocket.close(code=4003, reason=f"Model {model_name} is not enabled")
-                logger.warning(f"模型 {model_name} 未启用")
-                return False
-
-            # 接受连接
-            await websocket.accept()
-
-            # 创建该连接专用的 FunASR 服务实例
-            funasr_instance = FunASRService(default_model=model_name)
-
-            # 初始化指定模型
+        # 先检查连接数限制（不接受连接前检查）
+        if len(self.active_connections) >= self.max_connections:
             try:
-                await funasr_instance.initialize(model_name)
-            except Exception as e:
+                await websocket.close(code=1013, reason=f"已达到最大连接数限制 ({self.max_connections})")
+            except (WebSocketDisconnect, RuntimeError, OSError) as e:
+                logger.debug(f"关闭连接失败（连接可能已断开）: {e}")
+            return False
+
+        # 验证模型参数
+        model_name = model or settings.default_model
+        model_config = settings.get_model_config(model_name)
+
+        if model_config is None:
+            try:
+                await websocket.close(code=4002, reason=f"Invalid model: {model_name}")
+            except (WebSocketDisconnect, RuntimeError, OSError):
+                pass
+            logger.warning(f"无效的模型名称: {model_name}")
+            return False
+
+        if not model_config.get("enabled", True):
+            try:
+                await websocket.close(code=4003, reason=f"Model {model_name} is not enabled")
+            except (WebSocketDisconnect, RuntimeError, OSError):
+                pass
+            logger.warning(f"模型 {model_name} 未启用")
+            return False
+
+        # 接受连接
+        try:
+            await websocket.accept()
+        except (WebSocketDisconnect, RuntimeError, OSError) as e:
+            logger.warning(f"接受WebSocket连接失败: {e}")
+            return False
+
+        # 创建该连接专用的 FunASR 服务实例
+        funasr_instance = FunASRService(default_model=model_name)
+
+        # 初始化指定模型
+        try:
+            await funasr_instance.initialize(model_name)
+        except Exception as e:
+            try:
                 await websocket.close(code=4003, reason=f"Failed to load model: {model_name}")
-                logger.error(f"加载模型 {model_name} 失败: {e}")
-                return False
+            except (WebSocketDisconnect, RuntimeError, OSError):
+                pass
+            logger.error(f"加载模型 {model_name} 失败: {e}")
+            return False
 
+        # 准备所有连接状态（在添加到管理器之前）
+        connection_info = {
+            "connected_at": time.time(),
+            "last_activity": time.time(),
+            "session_id": f"session_{int(time.time() * 1000)}",
+            "model": model_name
+        }
+        audio_buffer = deque(maxlen=1000)
+        processing_tasks = []
+        violation_count = 0
+
+        # 准备VAD跟踪器（如果启用）
+        vad_tracker = None
+        if settings.vad_enabled:
+            vad_tracker = VADStateTracker(
+                silence_threshold_ms=settings.vad_silence_threshold_ms,
+                max_segment_duration_ms=settings.vad_max_segment_duration_ms
+            )
+            logger.info(f"VAD已启用，阈值: {settings.vad_silence_threshold_ms}ms")
+
+        # 原子性地添加所有状态到管理器
+        try:
             self.active_connections.append(websocket)
-            self.connection_info[websocket] = {
-                "connected_at": time.time(),
-                "last_activity": time.time(),
-                "session_id": f"session_{int(time.time() * 1000)}",
-                "model": model_name
-            }
-            self.audio_buffers[websocket] = deque(maxlen=1000)  # 保存最近1000个音频块
-            self.processing_tasks[websocket] = []
-            self.audio_segments[websocket] = []  # 用于累积音频数据
-            self.audio_sizes[websocket] = 0  # 初始化音频数据大小
-            self.funasr_services[websocket] = funasr_instance  # 保存该连接的服务实例
+            self.connection_info[websocket] = connection_info
+            self.audio_buffers[websocket] = audio_buffer
+            self.processing_tasks[websocket] = processing_tasks
+            self.audio_segments[websocket] = []
+            self.audio_sizes[websocket] = 0
+            self.funasr_services[websocket] = funasr_instance
+            self.violation_counts[websocket] = violation_count
+            if vad_tracker:
+                self.vad_trackers[websocket] = vad_tracker
+        except Exception as e:
+            # 添加状态时发生异常，回滚已添加的状态
+            logger.error(f"添加连接状态时发生异常，执行回滚: {e}")
+            self._rollback_connection_state(websocket, funasr_instance)
+            try:
+                await websocket.close(code=1011, reason="服务器内部错误")
+            except (WebSocketDisconnect, RuntimeError, OSError):
+                pass
+            return False
 
-            # 初始化VAD跟踪器
-            if settings.vad_enabled:
-                self.vad_trackers[websocket] = VADStateTracker(
-                    silence_threshold_ms=settings.vad_silence_threshold_ms,
-                    max_segment_duration_ms=settings.vad_max_segment_duration_ms
-                )
-                logger.info(f"VAD已启用，阈值: {settings.vad_silence_threshold_ms}ms")
-
-            # 发送连接成功消息
+        # 发送连接成功消息
+        try:
             await websocket.send_json({
                 "type": "connection_established",
-                "session_id": self.connection_info[websocket]["session_id"],
+                "session_id": connection_info["session_id"],
                 "model": model_name,
                 "model_display_name": model_config.get("display_name", model_name),
                 "message": "连接成功"
             })
-
-            logger.info(f"WebSocket 连接建立 (模型: {model_name})，当前连接数: {len(self.active_connections)}")
-            return True
-
-        except Exception as e:
-            logger.error(f"连接建立失败: {e}", exc_info=True)
-            try:
-                await websocket.close(code=1011, reason="服务器内部错误")
-            except (WebSocketDisconnect, RuntimeError, OSError) as close_err:
-                logger.debug(f"关闭连接失败（连接可能已断开）: {close_err}")
+        except (WebSocketDisconnect, RuntimeError, OSError) as e:
+            logger.warning(f"发送连接成功消息失败: {e}")
+            # 发送消息失败，清理连接
+            await self.disconnect(websocket)
             return False
+
+        logger.info(f"WebSocket 连接建立 (模型: {model_name})，当前连接数: {len(self.active_connections)}")
+        return True
+
+    def _rollback_connection_state(self, websocket: WebSocket, funasr_instance: FunASRService) -> None:
+        """
+        回滚连接状态（用于connect方法中发生异常时）
+
+        Args:
+            websocket: WebSocket连接对象
+            funasr_instance: FunASR服务实例
+        """
+        # 清理所有字典状态
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+        self.connection_info.pop(websocket, None)
+        self.audio_buffers.pop(websocket, None)
+        self.processing_tasks.pop(websocket, None)
+        self.audio_segments.pop(websocket, None)
+        self.audio_sizes.pop(websocket, None)
+        self.violation_counts.pop(websocket, None)
+        self.vad_trackers.pop(websocket, None)
+
+        # 检查是否已经添加到funasr_services字典
+        if websocket in self.funasr_services:
+            # 如果已在字典中，只从字典移除，不额外清理
+            self.funasr_services.pop(websocket, None)
+        else:
+            # 如果未在字典中，清理传入的实例
+            try:
+                funasr_instance.cleanup()
+            except Exception as e:
+                logger.warning(f"回滚时清理FunASR实例失败: {e}")
 
     async def disconnect(self, websocket: WebSocket):
         """断开WebSocket连接"""
@@ -157,6 +231,7 @@ class ConnectionManager:
             self.audio_segments.pop(websocket, None)
             self.audio_sizes.pop(websocket, None)
             self.vad_trackers.pop(websocket, None)  # 清理VAD跟踪器
+            self.violation_counts.pop(websocket, None)  # 清理违规计数
 
             # 清理该连接的 FunASR 服务实例
             if websocket in self.funasr_services:
@@ -169,7 +244,13 @@ class ConnectionManager:
             logger.info(f"WebSocket 连接断开，当前连接数: {len(self.active_connections)}")
 
     async def process_audio(self, websocket: WebSocket, audio_data: bytes):
-        """处理音频数据"""
+        """
+        处理音频数据
+
+        安全机制：
+        - 检查音频数据大小限制
+        - 违规计数机制：多次发送超大消息将被断开连接
+        """
         try:
             # 更新活动时间
             if websocket in self.connection_info:
@@ -178,9 +259,26 @@ class ConnectionManager:
             # 检查音频数据大小限制
             if websocket in self.audio_sizes:
                 if self.audio_sizes[websocket] + len(audio_data) > self.max_audio_size_per_connection:
+                    # 增加违规计数
+                    self.violation_counts[websocket] = self.violation_counts.get(websocket, 0) + 1
+                    violation_count = self.violation_counts[websocket]
+
+                    logger.warning(f"客户端 {self.connection_info[websocket].get('session_id', 'unknown')} "
+                                 f"发送过大音频数据，违规次数: {violation_count}/{self.MAX_VIOLATION_COUNT}")
+
+                    # 如果超过违规次数阈值，断开连接
+                    if violation_count >= self.MAX_VIOLATION_COUNT:
+                        logger.warning(f"客户端违规次数过多，断开连接")
+                        await websocket.send_json({
+                            "type": "error",
+                            "message": "违规次数过多，连接将被断开"
+                        })
+                        await self.disconnect(websocket)
+                        return
+
                     await websocket.send_json({
                         "type": "error",
-                        "message": "音频数据过大，请先停止录音再重新开始"
+                        "message": f"音频数据过大（剩余可尝试次数: {self.MAX_VIOLATION_COUNT - violation_count}）"
                     })
                     return
 

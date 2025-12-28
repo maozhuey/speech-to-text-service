@@ -4,9 +4,11 @@ import time
 import wave
 import tempfile
 import numpy as np
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Deque
 from concurrent.futures import ThreadPoolExecutor
 import asyncio
+import threading
+from collections import deque
 
 from modelscope.pipelines import pipeline
 from modelscope.utils.constant import Tasks
@@ -20,6 +22,115 @@ _model_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="funasr_m
 
 # 导入模型管理器
 from app.services.model_manager import get_model_manager
+
+# ============================================================================
+# 线程安全的单例模式实现
+# ============================================================================
+
+_funasr_service: Optional['FunASRService'] = None
+_service_lock = threading.Lock()
+_cleanup_queue: Deque[str] = deque()  # 使用deque提高FIFO性能
+_cleanup_queue_set: set[str] = set()  # 用于快速查找重复项
+_cleanup_lock = threading.Lock()
+
+
+def get_funasr_service() -> 'FunASRService':
+    """
+    获取全局FunASR服务实例（线程安全单例模式）
+
+    使用双重检查锁定模式确保线程安全：
+    - 第一次检查：避免不必要的锁等待
+    - 加锁：确保只有一个线程创建实例
+    - 第二次检查：防止多个线程同时通过第一次检查
+
+    Returns:
+        FunASRService: 全局唯一的FunASR服务实例
+    """
+    global _funasr_service
+    if _funasr_service is None:
+        with _service_lock:
+            if _funasr_service is None:
+                from app.core.config import settings
+                logger.info("初始化全局FunASR服务实例")
+                _funasr_service = FunASRService(default_model=settings.default_model)
+    return _funasr_service
+
+
+def add_to_cleanup_queue(temp_file: str) -> None:
+    """
+    将临时文件添加到清理队列
+
+    队列有最大长度限制，防止无界增长导致内存耗尽
+    使用deque + set实现高效的队列操作和重复检查
+
+    Args:
+        temp_file: 临时文件路径
+    """
+    from app.core.config import settings
+
+    # 在锁外读取配置，缓存到局部变量
+    max_size = settings.max_cleanup_queue_size
+
+    with _cleanup_lock:
+        # 使用集合快速检查重复
+        if temp_file in _cleanup_queue_set:
+            logger.debug(f"文件已在清理队列中: {temp_file}")
+            return
+
+        # 检查队列是否已满
+        if len(_cleanup_queue) >= max_size:
+            # 队列已满，移除最旧的条目（FIFO策略）
+            removed = _cleanup_queue.popleft()
+            _cleanup_queue_set.discard(removed)
+            logger.warning(f"清理队列已满({max_size})，移除最旧条目: {removed}")
+
+        # 添加到队列和集合
+        _cleanup_queue.append(temp_file)
+        _cleanup_queue_set.add(temp_file)
+        logger.debug(f"添加文件到清理队列: {temp_file}，队列长度: {len(_cleanup_queue)}")
+
+
+def retry_cleanup_failed_files(max_retries: int = 3) -> int:
+    """
+    重试清理失败的临时文件
+
+    Args:
+        max_retries: 最大重试次数
+
+    Returns:
+        成功清理的文件数量
+    """
+    global _cleanup_queue, _cleanup_queue_set
+    cleaned_count = 0
+
+    with _cleanup_lock:
+        remaining_files = deque()
+        remaining_set = set()
+
+        for temp_file in _cleanup_queue:
+            for attempt in range(max_retries):
+                try:
+                    if os.path.exists(temp_file):
+                        os.unlink(temp_file)
+                        logger.info(f"重试清理成功 (尝试 {attempt + 1}/{max_retries}): {temp_file}")
+                        cleaned_count += 1
+                        break  # 成功清理，跳出重试循环
+                    else:
+                        # 文件不存在，视为已清理
+                        break
+                except OSError as e:
+                    if attempt == max_retries - 1:
+                        logger.warning(f"重试 {max_retries} 次后仍清理失败: {temp_file}, 错误: {e}")
+                        remaining_files.append(temp_file)
+                        remaining_set.add(temp_file)
+                    else:
+                        logger.debug(f"重试清理 (尝试 {attempt + 1}/{max_retries}): {temp_file}")
+                        time.sleep(0.5)  # 等待500ms后重试
+
+        _cleanup_queue = remaining_files
+        _cleanup_queue_set = remaining_set
+
+    return cleaned_count
 
 
 class FunASRService:
@@ -249,10 +360,12 @@ class FunASRService:
                     os.unlink(temp_file)
                     logger.debug(f"已清理临时文件: {temp_file}")
                 except OSError as e:
-                    logger.error(f"清理临时文件失败 {temp_file}: {e}")
-                    # 可以考虑添加到清理队列，定期重试
+                    logger.error(f"清理临时文件失败 {temp_file}: {e}，已添加到清理队列")
+                    # 添加到清理队列，定期重试
+                    add_to_cleanup_queue(temp_file)
                 except Exception as e:
                     logger.error(f"清理临时文件时发生意外错误 {temp_file}: {e}")
+                    add_to_cleanup_queue(temp_file)
 
     async def batch_recognize(self, audio_chunks: List[bytes], sample_rate: int = 16000) -> List[Dict[str, Any]]:
         """批量识别多个音频片段"""
@@ -362,7 +475,11 @@ class FunASRService:
                             os.unlink(temp_file)
                             logger.debug(f"已清理VAD临时文件: {temp_file}")
                         except OSError as e:
-                            logger.error(f"清理VAD临时文件失败 {temp_file}: {e}")
+                            logger.error(f"清理VAD临时文件失败 {temp_file}: {e}，已添加到清理队列")
+                            add_to_cleanup_queue(temp_file)
+                        except Exception as e:
+                            logger.error(f"清理VAD临时文件时发生意外错误 {temp_file}: {e}")
+                            add_to_cleanup_queue(temp_file)
 
             return {"success": True, "has_speech": has_speech}
 
@@ -371,8 +488,13 @@ class FunASRService:
             # 检测失败时默认返回True（保守策略，避免丢失语音）
             return {"success": False, "has_speech": True}
 
-    def cleanup(self):
-        """清理资源"""
+    def cleanup(self) -> None:
+        """
+        清理资源
+
+        注意：全局线程池不会在此关闭，因为其他实例可能仍在使用
+        如需关闭线程池，请调用 shutdown_global_executor() 函数
+        """
         # 清理模型资源
         self.asr_pipeline = None
         self.punc_pipeline = None
@@ -385,15 +507,6 @@ class FunASRService:
             self.model_manager = None
 
         logger.info("FunASR 服务资源已清理")
-
-        # 清理线程池（释放资源）
-        global _model_executor
-        if _model_executor is not None:
-            try:
-                _model_executor.shutdown(wait=False)
-                logger.info("模型线程池已关闭")
-            except Exception as e:
-                logger.warning(f"关闭线程池时出错: {e}")
 
     def get_model_info(self) -> Dict[str, Any]:
         """
@@ -409,6 +522,56 @@ class FunASRService:
         }
 
 
-# 创建全局服务实例（使用配置中的默认模型）
-from app.core.config import settings
-funasr_service = FunASRService(default_model=settings.default_model)
+def shutdown_global_executor(wait: bool = True, timeout: Optional[float] = 30.0) -> None:
+    """
+    关闭全局线程池（仅在应用关闭时调用）
+
+    Args:
+        wait: 是否等待正在执行的任务完成（默认True）
+        timeout: 等待超时时间（秒），None表示无限等待
+    """
+    global _model_executor
+    if _model_executor is not None:
+        try:
+            # 先重试清理失败的临时文件
+            retry_cleanup_failed_files()
+
+            # 关闭线程池
+            _model_executor.shutdown(wait=wait)
+            logger.info(f"全局模型线程池已关闭 (wait={wait})")
+        except Exception as e:
+            logger.warning(f"关闭全局线程池时出错: {e}")
+        finally:
+            _model_executor = None
+
+
+def get_cleanup_queue_size() -> int:
+    """获取当前清理队列的大小（用于监控）"""
+    global _cleanup_queue
+    with _cleanup_lock:
+        return len(_cleanup_queue)
+
+
+# ============================================================================
+# 向后兼容：创建全局服务实例（使用懒加载单例模式）
+# ============================================================================
+
+# 注意：这里不再直接创建实例，而是通过get_funasr_service()函数获取
+# 为了向后兼容，保留funasr_service变量，但使用懒加载
+class _LazyFunASRServiceProxy:
+    """
+    懒加载代理类，用于向后兼容
+
+    当访问FunASRService的属性或方法时，自动获取真实的FunASRService实例
+    """
+    def __getattr__(self, name: str) -> Any:
+        real_service = get_funasr_service()
+        return getattr(real_service, name)
+
+    def __init__(self, *args, **kwargs):
+        # 不实际初始化，只是为了兼容旧的初始化代码
+        pass
+
+
+# 创建代理实例用于向后兼容
+funasr_service = _LazyFunASRServiceProxy()

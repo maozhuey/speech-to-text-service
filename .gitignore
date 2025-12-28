@@ -66,3 +66,7 @@ Thumbs.db
 
 # FunASR缓存
 .funasr_cache/
+
+# Node.js (Frontend)
+node_modules/
+package-lock.json

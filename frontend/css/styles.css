@@ -1,3 +1,8 @@
+/* Tailwind CSS 指令 */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
 /* 语音转文本服务 - 本地样式文件 */
 
 /* 重置和基础样式 */

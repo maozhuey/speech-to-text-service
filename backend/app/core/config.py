@@ -13,9 +13,9 @@ class Settings(BaseSettings):
     max_connections: int = 2
 
     # CORS安全配置
-    allowed_origins: str = "http://localhost:8080,http://127.0.0.1:8080"  # 允许的来源（逗号分隔）
+    allowed_origins: str = "http://localhost:8080,http://127.0.0.1:8080,http://localhost:8081,http://127.0.0.1:8081,http://localhost:8082,http://127.0.0.1:8082"  # 允许的来源（逗号分隔）
     allowed_methods: str = "GET,POST,OPTIONS"  # 允许的HTTP方法
-    allowed_headers: str = "Content-Type,Authorization"  # 允许的请求头
+    allowed_headers: str = "Content-Type,Authorization,Accept,Accept-Language,Content-Language,Origin"  # 允许的请求头
 
     def get_allowed_origins_list(self) -> List[str]:
         """将允许的来源字符串转换为列表"""
@@ -118,6 +118,20 @@ class Settings(BaseSettings):
     vad_silence_threshold_ms: int = 800  # 连续静音时长阈值（毫秒）
     vad_max_segment_duration_ms: int = 20000  # 单段最大时长（毫秒）
     vad_enabled: bool = True  # 是否启用VAD断句
+
+    # 安全配置
+    require_extended_health_auth: bool = True  # 是否要求扩展健康检查提供认证令牌
+    max_cleanup_queue_size: int = 1000  # 最大临时文件清理队列大小（防止内存耗尽）
+
+    @field_validator('max_cleanup_queue_size')
+    @classmethod
+    def validate_max_cleanup_queue_size(cls, v: int) -> int:
+        """验证max_cleanup_queue_size在合理范围内"""
+        if v < 100:
+            raise ValueError('max_cleanup_queue_size must be at least 100')
+        if v > 10000:
+            raise ValueError('max_cleanup_queue_size must not exceed 10000')
+        return v
 
     model_config = {
         "env_file": ".env",

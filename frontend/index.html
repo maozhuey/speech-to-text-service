@@ -4,6 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>语音转文本服务</title>
+    <!-- 本地构建的Tailwind CSS -->
+    <link rel="stylesheet" href="css/output.css">
     <link rel="stylesheet" href="css/styles.css">
 </head>
 <body class="min-h-screen flex flex-col">
@@ -15,9 +17,9 @@
                 <!-- 模型选择 -->
                 <div class="flex items-center space-x-2">
                     <label for="modelSelect" class="text-gray-300 text-sm">识别模型:</label>
-                    <select id="modelSelect" class="bg-gray-700 text-white px-3 py-1 rounded border border-gray-600 focus:outline-none focus:border-blue-500">
+                    <select id="modelSelect" class="bg-gray-700 text-white px-3 py-1 rounded border border-gray-600 focus:outline-none focus:border-blue-500" style="min-width: 150px;">
                         <option value="offline">离线模型（高精度）</option>
-                        <option value="streaming">流式模型（低延迟）</option>
+                        <option value="streaming" selected>流式模型（低延迟）</option>
                     </select>
                 </div>
                 <!-- 连接状态 -->
@@ -79,6 +81,10 @@
     </footer>
 
     <script>
+        // 配置：API基础URL（可通过环境变量或配置文件覆盖）
+        const API_BASE_URL = window.API_BASE_URL || 'http://localhost:8002';
+        const WS_BASE_URL = window.WS_BASE_URL || 'ws://localhost:8002';
+
         class SpeechToTextApp {
             constructor() {
                 this.ws = null;
@@ -93,8 +99,10 @@
                 this.bufferSize = 0; // 缓冲区大小
                 this.targetBufferSize = 160000; // 目标缓冲区大小（约5秒）
                 this.vadStatusTimeout = null; // VAD状态定时器
-                this.selectedModel = 'offline'; // 默认使用离线模型
+                this.selectedModel = 'streaming'; // 默认使用流式模型（低延迟）
                 this.currentModel = null; // 当前实际使用的模型
+                this.apiBaseUrl = API_BASE_URL; // API基础URL
+                this.wsBaseUrl = WS_BASE_URL; // WebSocket基础URL
 
                 this.initElements();
                 this.initEventListeners();
@@ -132,30 +140,90 @@
                 });
             }
 
+            /**
+             * 转义HTML特殊字符，防止XSS攻击
+             * @param {string} text - 需要转义的文本
+             * @returns {string} 转义后的安全文本
+             */
+            escapeHtml(text) {
+                const div = document.createElement('div');
+                div.textContent = text;
+                return div.innerHTML;
+            }
+
+            /**
+             * 安全地设置通知内容（防止XSS）
+             * @param {string} message - 通知消息
+             */
+            showNotification(message) {
+                const notification = document.createElement('div');
+                notification.className = 'notification';
+                // 使用textContent防止XSS
+                notification.textContent = message;
+                document.body.appendChild(notification);
+
+                setTimeout(() => {
+                    document.body.removeChild(notification);
+                }, 3000);
+            }
+
             async loadModelsAndConnect() {
                 // 加载可用模型列表
                 try {
-                    const response = await fetch('http://localhost:8002/api/v1/models');
+                    console.log('开始加载模型列表...');
+                    console.log('API URL:', `${this.apiBaseUrl}/api/v1/models`);
+
+                    // 添加超时控制
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 5000); // 5秒超时
+
+                    const response = await fetch(`${this.apiBaseUrl}/api/v1/models`, {
+                        signal: controller.signal
+                    });
+                    clearTimeout(timeoutId);
+
+                    console.log('响应状态:', response.status, response.statusText);
                     const data = await response.json();
+                    console.log('模型列表响应:', data);
+
                     if (data.success && data.models) {
-                        // 更新模型选择下拉菜单
-                        this.modelSelect.innerHTML = '';
+                        // 使用innerHTML直接构建选项（更可靠）
+                        let optionsHtml = '';
+                        let hasDefaultModel = false;
                         data.models.forEach(model => {
-                            const option = document.createElement('option');
-                            option.value = model.name;
-                            option.textContent = `${model.display_name}${model.enabled ? '' : ' (未启用)'}`;
-                            option.disabled = !model.enabled;
-                            if (model.name === data.default) {
-                                option.selected = true;
+                            const selected = model.name === this.selectedModel ? ' selected' : '';
+                            const disabled = model.enabled ? '' : ' disabled';
+                            optionsHtml += `<option value="${model.name}"${selected}${disabled}>${model.display_name}</option>`;
+                            if (model.name === this.selectedModel) {
+                                hasDefaultModel = true;
+                                console.log('设置默认模型:', model.name, model.display_name);
                             }
-                            this.modelSelect.appendChild(option);
                         });
-                        this.selectedModel = data.default;
-                        console.log('模型列表加载成功:', data.models);
+                        this.modelSelect.innerHTML = optionsHtml;
+
+                        console.log('模型列表加载成功，选项已设置');
+                    } else {
+                        console.warn('模型列表数据无效:', data);
+                        throw new Error('模型列表数据无效');
                     }
                 } catch (error) {
                     console.error('加载模型列表失败:', error);
-                    // 使用默认选项
+                    if (error.name === 'AbortError') {
+                        console.error('请求超时');
+                    }
+                    // 恢复默认选项
+                    this.modelSelect.innerHTML = '';
+                    const offlineOption = document.createElement('option');
+                    offlineOption.value = 'offline';
+                    offlineOption.textContent = '离线模型（高精度）';
+                    this.modelSelect.appendChild(offlineOption);
+                    const streamingOption = document.createElement('option');
+                    streamingOption.value = 'streaming';
+                    streamingOption.textContent = '流式模型（低延迟）';
+                    streamingOption.selected = true;
+                    this.modelSelect.appendChild(streamingOption);
+                    this.modelSelect.value = 'streaming';
+                    console.log('已恢复为静态选项，默认: streaming');
                 }
 
                 // 连接 WebSocket
@@ -179,7 +247,7 @@
 
                 try {
                     // 构建带模型参数的 WebSocket URL
-                    const wsUrl = `ws://localhost:8002/ws?model=${this.selectedModel}`;
+                    const wsUrl = `${this.wsBaseUrl}/ws?model=${encodeURIComponent(this.selectedModel)}`;
                     this.ws = new WebSocket(wsUrl);
 
                     this.ws.onopen = () => {
@@ -203,7 +271,9 @@
                         console.log('WebSocket连接关闭:', event.code, event.reason);
                         // 如果是模型错误，提示用户
                         if (event.code === 4002 || event.code === 4003) {
-                            this.showNotification(`模型错误: ${event.reason}`);
+                            // 转义服务器返回的错误原因
+                            const safeReason = this.escapeHtml(event.reason || '未知错误');
+                            this.showNotification(`模型错误: ${safeReason}`);
                         }
                         this.startReconnect();
                     };
@@ -396,8 +466,8 @@
                 switch (message.type) {
                     case 'connection_established':
                         console.log('连接建立成功:', message.session_id);
-                        // 显示当前使用的模型
-                        const modelInfo = message.model_display_name || message.model || '未知模型';
+                        // 显示当前使用的模型（转义防止XSS）
+                        const modelInfo = this.escapeHtml(message.model_display_name || message.model || '未知模型');
                         this.showNotification(`已连接 - 使用${modelInfo}`);
                         break;
 

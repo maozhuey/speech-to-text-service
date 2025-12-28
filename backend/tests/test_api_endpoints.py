@@ -47,10 +47,27 @@ class TestHealthEndpoint:
         assert "memory_usage" not in data
         assert "max_connections" not in data
 
-    def test_extended_health_endpoint(self):
-        """测试扩展健康检查端点"""
+    def test_extended_health_endpoint_requires_auth(self):
+        """测试扩展健康检查端点需要认证"""
         client = TestClient(app)
+        # 无token访问应该返回401
         response = client.get("/api/v1/health/extended")
+
+        assert response.status_code == 401
+        data = response.json()
+        assert "detail" in data
+
+    def test_extended_health_endpoint_with_valid_token(self):
+        """测试使用有效令牌访问扩展健康检查端点"""
+        client = TestClient(app)
+
+        # 先生成一个令牌
+        token_response = client.get("/api/v1/token")
+        assert token_response.status_code == 200
+        token = token_response.json()["token"]
+
+        # 使用令牌访问扩展健康检查
+        response = client.get(f"/api/v1/health/extended?token={token}")
 
         assert response.status_code == 200
         data = response.json()
@@ -60,6 +77,13 @@ class TestHealthEndpoint:
         assert "max_connections" in data
         assert "memory_usage_percent" in data
         assert "cpu_usage_percent" in data
+
+    def test_extended_health_endpoint_with_invalid_token(self):
+        """测试使用无效令牌访问扩展健康检查端点"""
+        client = TestClient(app)
+        response = client.get("/api/v1/health/extended?token=invalid_token")
+
+        assert response.status_code == 403
 
 
 class TestInfoEndpoint:
