@@ -161,13 +161,28 @@ ws://localhost:8000/ws
 - 识别准确率：> 95%
 - 并发连接：最多2个
 - CPU使用率：< 80%（M2 Pro）
+- VAD处理性能：160万次/秒
+- VAD延迟：< 0.01ms/次
 
 ## 开发指南
 
 ### 运行测试
 ```bash
+# 运行所有测试
+python backend/tests/test_basic.py
+python backend/tests/test_vad_tracker.py
+python backend/tests/test_vad_service.py
+python backend/tests/test_integration.py
+
+# 或使用pytest
 pytest backend/tests/
 ```
+
+### 测试覆盖
+- **test_basic.py**: 基础功能测试
+- **test_vad_tracker.py**: VAD状态跟踪器测试（12个场景）
+- **test_vad_service.py**: VAD检测服务测试（9个场景）
+- **test_integration.py**: 端到端集成测试（6个场景）
 
 ### 代码格式化
 ```bash
