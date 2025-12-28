@@ -146,11 +146,14 @@ class FunASRService:
             # 如果有识别结果，添加标点符号
             if text:
                 try:
+                    logger.info(f"识别文本（加标点前）: {text}")
                     punc_result = self.punc_pipeline(text)
+                    logger.info(f"标点结果: {punc_result}")
                     if isinstance(punc_result, dict) and 'text' in punc_result:
                         text = punc_result['text']
+                        logger.info(f"识别文本（加标点后）: {text}")
                 except Exception as e:
-                    logger.warning(f"标点符号添加失败: {e}")
+                    logger.error(f"标点符号添加失败: {e}", exc_info=True)
             else:
                 logger.warning("语音识别未返回文本结果")
 
