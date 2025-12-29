@@ -67,7 +67,14 @@ class ConnectionManager:
         Returns:
             连接是否成功建立
         """
-        # 先检查连接数限制（不接受连接前检查）
+        # 先接受连接（必须在接受连接后才能发送消息）
+        try:
+            await websocket.accept()
+        except (WebSocketDisconnect, RuntimeError, OSError) as e:
+            logger.warning(f"接受WebSocket连接失败: {e}")
+            return False
+
+        # 检查连接数限制
         if len(self.active_connections) >= self.max_connections:
             try:
                 await websocket.close(code=1013, reason=f"已达到最大连接数限制 ({self.max_connections})")
@@ -93,13 +100,6 @@ class ConnectionManager:
             except (WebSocketDisconnect, RuntimeError, OSError):
                 pass
             logger.warning(f"模型 {model_name} 未启用")
-            return False
-
-        # 接受连接
-        try:
-            await websocket.accept()
-        except (WebSocketDisconnect, RuntimeError, OSError) as e:
-            logger.warning(f"接受WebSocket连接失败: {e}")
             return False
 
         # 创建该连接专用的 FunASR 服务实例
@@ -252,6 +252,11 @@ class ConnectionManager:
         - 违规计数机制：多次发送超大消息将被断开连接
         """
         try:
+            logger.info(f"[DEBUG] process_audio 被调用，音频数据大小: {len(audio_data)} 字节")
+            logger.info(f"[DEBUG] websocket 在 connection_info 中: {websocket in self.connection_info}")
+            logger.info(f"[DEBUG] websocket 在 audio_sizes 中: {websocket in self.audio_sizes}")
+            logger.info(f"[DEBUG] websocket 在 audio_segments 中: {websocket in self.audio_segments}")
+
             # 更新活动时间
             if websocket in self.connection_info:
                 self.connection_info[websocket]["last_activity"] = time.time()
