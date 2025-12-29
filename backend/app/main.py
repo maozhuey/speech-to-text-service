@@ -91,9 +91,9 @@ app.include_router(info.router, prefix="/api/v1", tags=["info"])
 
 # 挂载静态文件目录（前端资源）
 # 获取backend目录，然后向上找到正确的frontend目录
-backend_dir = os.path.dirname(os.path.abspath(__file__))
-# 从backend目录向上两级到apps目录，然后找到frontend
-frontend_path = os.path.abspath(os.path.join(os.path.dirname(os.path.dirname(backend_dir)), "语音转文本服务", "frontend"))
+current_dir = os.path.dirname(os.path.abspath(__file__))
+# 从backend/app向上一级到项目根目录，然后找到frontend
+frontend_path = os.path.abspath(os.path.join(current_dir, "..", "..", "frontend"))
 
 if os.path.exists(frontend_path):
     app.mount("/frontend", StaticFiles(directory=frontend_path), name="frontend")
